@@ -1,0 +1,12 @@
+.eslintcache
+.DS_Store
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/

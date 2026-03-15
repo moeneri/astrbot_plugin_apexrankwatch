@@ -1,0 +1,78 @@
+{
+  "api_key": {
+    "description": "Apex Legends API Key",
+    "type": "string",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "debug_logging": {
+    "description": "是否开启调试日志（记录请求参数与返回数据，默认关闭）",
+    "type": "bool",
+    "default": false
+  },
+  "check_interval": {
+    "description": "轮询时间间隔（分钟）",
+    "type": "int",
+    "default": 2
+  },
+  "timeout_ms": {
+    "description": "API 请求超时时间（毫秒）",
+    "type": "int",
+    "default": 10000
+  },
+  "max_retries": {
+    "description": "API 请求最大重试次数",
+    "type": "int",
+    "default": 3
+  },
+  "min_valid_score": {
+    "description": "最小有效分数（低于此值视为无效）",
+    "type": "int",
+    "default": 1
+  },
+  "blacklist": {
+    "description": "黑名单 ID 列表",
+    "type": "string",
+    "hint": "多个 ID 用中英文逗号分隔，例如：moeneri,moeneri2\nUID 示例：uid:1010153800824",
+    "default": ""
+  },
+  "query_blocklist": {
+    "description": "禁止查询的玩家ID列表",
+    "type": "string",
+    "hint": "多个ID用中英文逗号分隔，例如：moeneri,moeneri2\nUID 示例：uid:1010153800824",
+    "default": ""
+  },
+  "user_blacklist": {
+    "description": "禁止使用的QQ号列表",
+    "type": "string",
+    "hint": "多个QQ号用中英文逗号分隔，例如：12345,67890",
+    "default": ""
+  },
+  "owner_qq": {
+    "description": "主人QQ号（拥有最大权限，可多个）",
+    "type": "string",
+    "hint": "多个QQ号用中英文逗号分隔，例如：12345,67890",
+    "default": ""
+  },
+  "whitelist_enabled": {
+    "description": "是否启用群白名单模式",
+    "type": "bool",
+    "default": false
+  },
+  "whitelist_groups": {
+    "description": "允许使用的群ID白名单",
+    "type": "string",
+    "hint": "多个群ID用中英文逗号分隔，例如：group1,group2",
+    "default": ""
+  },
+  "allow_private": {
+    "description": "是否允许私聊使用",
+    "type": "bool",
+    "default": true
+  },
+  "data_dir": {
+    "description": "数据存储目录（留空使用 AstrBot 默认插件数据目录）",
+    "type": "string",
+    "default": ""
+  }
+}
