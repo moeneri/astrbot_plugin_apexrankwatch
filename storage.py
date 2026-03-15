@@ -4,7 +4,10 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from utils import coerce_bool
+try:
+    from .utils import coerce_bool
+except ImportError:
+    from utils import coerce_bool
 
 
 @dataclass
@@ -58,9 +61,9 @@ class GroupRecord:
     def from_dict(group_id: str, data: dict) -> "GroupRecord":
         players_raw = data.get("players", {}) if isinstance(data, dict) else {}
         players = {
-            k: PlayerRecord.from_dict(v)
-            for k, v in players_raw.items()
-            if isinstance(v, dict)
+            key: PlayerRecord.from_dict(value)
+            for key, value in players_raw.items()
+            if isinstance(value, dict)
         }
         return GroupRecord(
             group_id=group_id,
@@ -82,20 +85,24 @@ class GroupStore:
         try:
             content = self._data_file.read_text(encoding="utf-8")
             raw = json.loads(content)
-            if not isinstance(raw, dict):
-                return
-            self._groups = {
-                k: GroupRecord.from_dict(k, v)
-                for k, v in raw.items()
-                if isinstance(v, dict)
-            }
-        except Exception as exc:
+        except (OSError, json.JSONDecodeError) as exc:
             self._logger.error(f"加载群订阅数据失败: {exc}")
+            return
+
+        if not isinstance(raw, dict):
+            self._logger.error("加载群订阅数据失败: 根节点不是对象")
+            return
+
+        self._groups = {
+            key: GroupRecord.from_dict(key, value)
+            for key, value in raw.items()
+            if isinstance(value, dict)
+        }
 
     def save(self) -> None:
         self._data_file.parent.mkdir(parents=True, exist_ok=True)
         tmp_file = self._data_file.with_suffix(".tmp")
-        payload = {k: v.to_dict() for k, v in self._groups.items()}
+        payload = {key: value.to_dict() for key, value in self._groups.items()}
         tmp_file.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
             encoding="utf-8",
@@ -107,7 +114,11 @@ class GroupStore:
 
     def ensure_group(self, group_id: str, origin: str) -> GroupRecord:
         if group_id not in self._groups:
-            self._groups[group_id] = GroupRecord(group_id=group_id, origin=origin, players={})
+            self._groups[group_id] = GroupRecord(
+                group_id=group_id,
+                origin=origin,
+                players={},
+            )
         if origin:
             self._groups[group_id].origin = origin
         return self._groups[group_id]
@@ -126,9 +137,7 @@ class GroupStore:
 
     def remove_player(self, group_id: str, player_key: str) -> bool:
         group = self._groups.get(group_id)
-        if not group:
-            return False
-        if player_key not in group.players:
+        if not group or player_key not in group.players:
             return False
         del group.players[player_key]
         self.remove_group_if_empty(group_id)

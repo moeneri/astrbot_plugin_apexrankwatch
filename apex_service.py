@@ -14,6 +14,44 @@ import httpx
 
 _TRANSLATIONS_FILE = Path(__file__).with_name("translations.json")
 
+JSONLD_SCRIPT_RE = re.compile(
+    r"<script\s+type=\"application/ld\+json\">(.*?)</script>",
+    re.IGNORECASE | re.DOTALL,
+)
+SEASON_LIVE_RE = re.compile(
+    r"Season\s+(\d+)\s+路\s+([^\n]+?)\s+is live now",
+    re.IGNORECASE,
+)
+SEASON_STARTED_RE = re.compile(
+    r"Season\s+(\d+)\s+路\s+([^\n]+?)\s+Started",
+    re.IGNORECASE,
+)
+SEASON_NAME_RE = re.compile(r"Season\s+(\d+)\s+路\s+(.+)", re.IGNORECASE)
+DATE_RANGE_RE = re.compile(
+    r"Started\s+([A-Za-z]{3}\s+\d{1,2})\s+(\d{4})\s+"
+    r"Ends\s+([A-Za-z]{3}\s+\d{1,2})\s+(\d{4})",
+    re.IGNORECASE | re.DOTALL,
+)
+DATE_RANGE_LONG_RE = re.compile(
+    r"Started\s+([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}).*?"
+    r"Ends\s+([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})",
+    re.IGNORECASE | re.DOTALL,
+)
+TIMEZONE_RE = re.compile(r"Timezone\s+路\s+([^\n]+)", re.IGNORECASE)
+TIMEZONE_PAGE_RE = re.compile(r"Timezone\s*:?\s*([^\n<]+)", re.IGNORECASE)
+UPDATE_HINT_RE = re.compile(
+    r"Respawn\s+deploys\s+all\s+major\s+updates\s+at\s+([^\n\.]+)",
+    re.IGNORECASE,
+)
+COUNTDOWN_ARRAY_RE = re.compile(
+    r'targetDate"\s*:\s*\[0\s*,\s*"([^"]+)"\]',
+    re.IGNORECASE,
+)
+COUNTDOWN_STRING_RE = re.compile(
+    r'targetDate"\s*:\s*"([^"]+)"',
+    re.IGNORECASE,
+)
+
 
 NAME_MAP: dict[str, str] = {
     # Rank
@@ -552,6 +590,56 @@ def _to_float(value: Any) -> float | None:
         return None
 
 
+def _extract_jsonld_blocks(html: str) -> list[str]:
+    return JSONLD_SCRIPT_RE.findall(html)
+
+
+def _extract_current_season_identity(
+    html: str, jsonld_blocks: list[str]
+) -> tuple[int | None, str, str]:
+    try:
+        season_number, season_name, season_url = _extract_season_from_jsonld(jsonld_blocks)
+    except Exception:
+        season_number, season_name, season_url = None, "", ""
+
+    if season_number is not None and season_name:
+        return season_number, season_name, season_url
+
+    match = SEASON_LIVE_RE.search(html) or SEASON_STARTED_RE.search(html)
+    if not match:
+        return season_number, season_name, season_url
+    return _to_int(match.group(1)), match.group(2).strip(), season_url
+
+
+def _extract_current_season_dates(html: str) -> tuple[str, str, str]:
+    start_date = "未知"
+    end_date = "未知"
+    end_iso = _extract_countdown_target(html) or ""
+    if end_iso:
+        end_date = _format_iso_date(end_iso)
+
+    date_match = DATE_RANGE_RE.search(html)
+    if date_match:
+        start_date = f"{date_match.group(1)} {date_match.group(2)}"
+        end_date = f"{date_match.group(3)} {date_match.group(4)}"
+    return start_date, end_date, end_iso
+
+
+def _extract_current_season_metadata(html: str) -> tuple[str, str]:
+    timezone = "未知"
+    update_time_hint = "未知"
+
+    tz_match = TIMEZONE_RE.search(html)
+    if tz_match:
+        timezone = _clean_timezone(tz_match.group(1))
+
+    hint_match = UPDATE_HINT_RE.search(html)
+    if hint_match:
+        update_time_hint = hint_match.group(1).strip()
+
+    return timezone, update_time_hint
+
+
 def _parse_current_season(html: str) -> SeasonInfo:
     season_number: int | None = None
     season_name = ""
@@ -564,58 +652,13 @@ def _parse_current_season(html: str) -> SeasonInfo:
     end_iso = ""
 
     if html:
-        jsonld_blocks = re.findall(
-            r"<script\s+type=\"application/ld\+json\">(.*?)</script>",
+        jsonld_blocks = _extract_jsonld_blocks(html)
+        season_number, season_name, season_url = _extract_current_season_identity(
             html,
-            re.IGNORECASE | re.DOTALL,
+            jsonld_blocks,
         )
-        try:
-            season_number, season_name, season_url = _extract_season_from_jsonld(
-                jsonld_blocks
-            )
-        except Exception:
-            season_number, season_name, season_url = None, "", ""
-        if season_number is None or not season_name:
-            match = re.search(
-                r"Season\s+(\d+)\s+·\s+([^\n]+?)\s+is live now",
-                html,
-                re.IGNORECASE,
-            )
-            if not match:
-                match = re.search(
-                    r"Season\s+(\d+)\s+·\s+([^\n]+?)\s+Started",
-                    html,
-                    re.IGNORECASE,
-                )
-            if match:
-                season_number = _to_int(match.group(1))
-                season_name = match.group(2).strip()
-
-        end_iso = _extract_countdown_target(html) or ""
-        if end_iso:
-            end_date = _format_iso_date(end_iso)
-
-        date_match = re.search(
-            r"Started\s+([A-Za-z]{3}\s+\d{1,2})\s+(\d{4})\s+"
-            r"Ends\s+([A-Za-z]{3}\s+\d{1,2})\s+(\d{4})",
-            html,
-            re.IGNORECASE | re.DOTALL,
-        )
-        if date_match:
-            start_date = f"{date_match.group(1)} {date_match.group(2)}"
-            end_date = f"{date_match.group(3)} {date_match.group(4)}"
-
-        tz_match = re.search(r"Timezone\s+·\s+([^\n]+)", html, re.IGNORECASE)
-        if tz_match:
-            timezone = _clean_timezone(tz_match.group(1))
-
-        hint_match = re.search(
-            r"Respawn\s+deploys\s+all\s+major\s+updates\s+at\s+([^\n\.]+)",
-            html,
-            re.IGNORECASE,
-        )
-        if hint_match:
-            update_time_hint = hint_match.group(1).strip()
+        start_date, end_date, end_iso = _extract_current_season_dates(html)
+        timezone, update_time_hint = _extract_current_season_metadata(html)
 
     return SeasonInfo(
         season_number=season_number,
@@ -678,7 +721,7 @@ def _extract_season_from_jsonld(
 
 
 def _parse_season_name(text: str) -> tuple[int | None, str]:
-    match = re.search(r"Season\s+(\d+)\s+·\s+(.+)", text, re.IGNORECASE)
+    match = SEASON_NAME_RE.search(text)
     if not match:
         return None, ""
     number = _to_int(match.group(1))
@@ -706,17 +749,12 @@ def _apply_season_page_overrides(season_info: SeasonInfo, html: str) -> None:
         season_info.end_date = end
 
     if season_info.start_date == "未知" or season_info.end_date == "未知":
-        match = re.search(
-            r"Started\s+([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}).*?"
-            r"Ends\s+([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})",
-            html,
-            re.IGNORECASE | re.DOTALL,
-        )
+        match = DATE_RANGE_LONG_RE.search(html)
         if match:
             season_info.start_date = match.group(1).strip()
             season_info.end_date = match.group(2).strip()
 
-    tz_match = re.search(r"Timezone\s*:?\s*([^\n<]+)", html, re.IGNORECASE)
+    tz_match = TIMEZONE_PAGE_RE.search(html)
     if tz_match:
         season_info.timezone = _clean_timezone(tz_match.group(1))
     elif start_iso and start_iso.endswith("Z"):
@@ -724,13 +762,8 @@ def _apply_season_page_overrides(season_info: SeasonInfo, html: str) -> None:
 
 
 def _extract_event_dates_from_jsonld(html: str) -> tuple[str | None, str | None]:
-    import json
 
-    blocks = re.findall(
-        r"<script\s+type=\"application/ld\+json\">(.*?)</script>",
-        html,
-        re.IGNORECASE | re.DOTALL,
-    )
+    blocks = _extract_jsonld_blocks(html)
     for block in blocks:
         block = block.strip()
         if not block:
@@ -774,18 +807,10 @@ def _clean_timezone(value: str) -> str:
 
 
 def _extract_countdown_target(html: str) -> str | None:
-    match = re.search(
-        r"targetDate\"\s*:\s*\[0\s*,\s*\"([^\"]+)\"\]",
-        html,
-        re.IGNORECASE,
-    )
+    match = COUNTDOWN_ARRAY_RE.search(html)
     if match:
         return match.group(1).strip()
-    match = re.search(
-        r"targetDate\"\s*:\s*\"([^\"]+)\"",
-        html,
-        re.IGNORECASE,
-    )
+    match = COUNTDOWN_STRING_RE.search(html)
     if match:
         return match.group(1).strip()
     return None

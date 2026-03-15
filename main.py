@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass
@@ -14,7 +13,7 @@ import astrbot.api.message_components as Comp
 from astrbot.api.star import Context, Star, StarTools
 
 try:
-    from apex_service import (
+    from .apex_service import (
         ApexApiClient,
         ApexPlayerStats,
         SeasonInfo,
@@ -23,12 +22,9 @@ try:
         is_likely_season_reset,
         is_score_drop_abnormal,
     )
-    from storage import GroupStore, PlayerRecord
-    from utils import coerce_bool, coerce_int, now_epoch_ms, now_str
+    from .storage import GroupStore, PlayerRecord
+    from .utils import coerce_bool, coerce_int, now_epoch_ms, now_str
 except ImportError:
-    current_dir = Path(__file__).resolve().parent
-    if str(current_dir) not in sys.path:
-        sys.path.insert(0, str(current_dir))
     from apex_service import (
         ApexApiClient,
         ApexPlayerStats,
@@ -168,6 +164,7 @@ class Main(Star):
         self._poll_task = None
         self._poll_concurrency = 5
         self._poll_semaphore = asyncio.Semaphore(self._poll_concurrency)
+        self._runtime_started = False
 
         logger.info(
             f"Apex Rank Watch 已加载，检测间隔 {self._config.check_interval} 分钟"
@@ -175,17 +172,44 @@ class Main(Star):
         if self._config.debug_logging:
             logger.info("Apex Rank Watch 调试日志已开启")
 
-    async def terminate(self):
+        self._schedule_runtime_start()
+
+    async def _shutdown_runtime(self) -> None:
         self._stop_event.set()
         if self._poll_task:
-            await self._poll_task
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except asyncio.CancelledError:
+                pass
         await self._api.close()
+
+    async def terminate(self):
+        await self._shutdown_runtime()
+
+    async def on_unload(self):
+        await self._shutdown_runtime()
 
     @staticmethod
     def _resolve_data_dir(data_dir: str) -> Path:
         if data_dir:
             return Path(data_dir)
         return Path(StarTools.get_data_dir())
+
+    def _schedule_runtime_start(self) -> None:
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            return
+        if loop.is_closed():
+            return
+        loop.call_soon(self._start_runtime)
+
+    def _start_runtime(self) -> None:
+        if self._runtime_started:
+            return
+        self._runtime_started = True
+        self._ensure_poll_task()
 
     def _ensure_poll_task(self) -> bool:
         if self._poll_task and not self._poll_task.done():
@@ -315,20 +339,31 @@ class Main(Star):
             return "\u200b\n" + text.lstrip("\n")
         return text
 
+    @staticmethod
+    def _read_first_available(source, *names):
+        if source is None:
+            return None
+        if isinstance(source, dict):
+            for name in names:
+                value = source.get(name)
+                if value not in (None, ""):
+                    return value
+            return None
+        for name in names:
+            value = getattr(source, name, None)
+            if value not in (None, ""):
+                return value
+        return None
+
     def _get_reply_message_id(self, event: AstrMessageEvent):
         message_obj = getattr(event, "message_obj", None)
         if not message_obj:
             return None
-        value = getattr(message_obj, "message_id", None) or getattr(message_obj, "id", None)
+        value = self._read_first_available(message_obj, "message_id", "id")
         if value:
             return value
         raw = getattr(message_obj, "raw_message", None)
-        if isinstance(raw, dict):
-            for key in ("message_id", "id", "messageId", "msg_id"):
-                if raw.get(key):
-                    return raw.get(key)
-        # Some adapters may expose raw message as an object.
-        value = getattr(raw, "message_id", None) or getattr(raw, "id", None)
+        value = self._read_first_available(raw, "message_id", "id", "messageId", "msg_id")
         return value or None
 
     @staticmethod
@@ -428,20 +463,13 @@ class Main(Star):
         message_obj = getattr(event, "message_obj", None)
         user_id = ""
         if message_obj:
-            user_id = str(getattr(message_obj, "user_id", "") or "")
+            user_id = str(self._read_first_available(message_obj, "user_id") or "")
             if not user_id:
                 sender = getattr(message_obj, "sender", None)
                 if sender:
-                    user_id = str(
-                        getattr(sender, "user_id", "")
-                        or getattr(sender, "id", "")
-                        or getattr(sender, "uid", "")
-                        or ""
-                    )
+                    user_id = str(self._read_first_available(sender, "user_id", "id", "uid") or "")
         if not user_id:
-            user_id = str(getattr(event, "user_id", "") or "")
-        if not user_id:
-            user_id = str(getattr(event, "sender_id", "") or "")
+            user_id = str(self._read_first_available(event, "user_id", "sender_id") or "")
         return user_id
 
     def _is_owner(self, user_id: str) -> bool:
@@ -477,7 +505,6 @@ class Main(Star):
         return group_id in groups
 
     def _guard_access(self, event: AstrMessageEvent, require_group: bool = False) -> str | None:
-        self._ensure_poll_task()
         user_id = self._get_user_id(event)
         if self._is_owner(user_id):
             return None
@@ -822,7 +849,6 @@ class Main(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def _season_keyword_listener(self, event: AstrMessageEvent):
-        self._ensure_poll_task()
         text = (getattr(event, "message_str", "") or "").strip()
         if not text:
             return
@@ -1335,7 +1361,12 @@ class Main(Star):
 
     async def _poll_loop(self) -> None:
         while not self._stop_event.is_set():
-            await self._poll_once()
+            try:
+                await self._poll_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"轮询任务执行失败: {exc}")
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(), timeout=self._config.check_interval * 60
