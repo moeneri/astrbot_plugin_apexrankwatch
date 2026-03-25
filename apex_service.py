@@ -117,7 +117,7 @@ NAME_MAP: dict[str, str] = {
     "Mad Maggie": "疯玛吉",
     "Newcastle": "纽卡斯尔",
     "Vantage": "万蒂奇",
-    "Catalyst": "催化剂",
+    "Catalyst": "卡特莉丝",
     "Ballistic": "弹道",
     "Conduit": "导管",
     "Alter": "变幻",
