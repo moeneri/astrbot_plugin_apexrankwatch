@@ -12,24 +12,6 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 - 支持玩家名、`uid:`、`uuid:` 查询
 - 支持群白名单、用户黑名单、玩家查询黑名单
 
-## 命令
-
-| 命令 | 说明 |
-| --- | --- |
-| `/apexhelp` | 查看帮助 |
-| `/apextest` | 测试插件和主动消息能力 |
-| `/apexrank <玩家名\|uid:...> [平台]` | 查询玩家段位信息 |
-| `/apexrankwatch <玩家名\|uid:...> [平台]` | 将玩家加入当前群监控 |
-| `/apexranklist` | 查看当前群监控列表 |
-| `/apexrankremove <玩家名\|uid:...> [平台]` | 从当前群移除玩家监控 |
-| `/map` | 查询排位地图轮换 |
-| `/匹配地图` | 查询三人赛匹配地图轮换 |
-| `/apexseason` | 查询当前赛季信息 |
-| `/apexpredator [平台]` | 查询猎杀线和大师数量 |
-| `/apexblacklist <add\|remove\|list\|clear> <玩家ID>` | 管理玩家黑名单 |
-| `/赛季关闭` | 关闭当前群的“赛季”关键词自动回复 |
-| `/赛季开启` | 开启当前群的“赛季”关键词自动回复 |
-
 ## 常用命令效果
 
 ### `/新赛季`
@@ -61,6 +43,24 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 将玩家加入群监控；下图为排位分变化后的主动通知示例。
 
 ![持续监控变化](assets/readme/rankwatch_delta.png)
+
+## 命令
+
+| 命令 | 说明 |
+| --- | --- |
+| `/apexhelp` | 查看帮助 |
+| `/apextest` | 测试插件和主动消息能力 |
+| `/apexrank <玩家名\|uid:...> [平台]` | 查询玩家段位信息 |
+| `/apexrankwatch <玩家名\|uid:...> [平台]` | 将玩家加入当前群监控 |
+| `/apexranklist` | 查看当前群监控列表 |
+| `/apexrankremove <玩家名\|uid:...> [平台]` | 从当前群移除玩家监控 |
+| `/map` | 查询排位地图轮换 |
+| `/匹配地图` | 查询三人赛匹配地图轮换 |
+| `/apexseason` | 查询当前赛季信息 |
+| `/apexpredator [平台]` | 查询猎杀线和大师数量 |
+| `/apexblacklist <add\|remove\|list\|clear> <玩家ID>` | 管理玩家黑名单 |
+| `/赛季关闭` | 关闭当前群的“赛季”关键词自动回复 |
+| `/赛季开启` | 开启当前群的“赛季”关键词自动回复 |
 
 ## 常用别名
 
