@@ -99,7 +99,6 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `api_key` | 空 | Apex Legends API Key |
-| `debug_logging` | `false` | 是否开启脱敏调试日志 |
 | `check_interval` | `2` | 排位分监控轮询间隔，单位分钟 |
 | `timeout_ms` | `10000` | API 请求超时时间，单位毫秒 |
 | `max_retries` | `3` | API 请求失败重试次数 |
@@ -119,7 +118,6 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 - 赛季结束时间来自公开倒计时页面，插件会统一按北京时间展示。
 - 同名玩家可能在多个平台存在记录，建议在命令后显式填写平台。
 - 监控通知依赖 AstrBot 的主动消息能力；如果当前适配器不支持主动消息，查询命令仍可正常使用。
-- 调试日志默认关闭；开启后会对 API Key、UID、玩家名等敏感字段做脱敏处理。
 
 ## 许可
 

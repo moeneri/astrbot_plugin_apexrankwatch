@@ -2,7 +2,7 @@ name: astrbot_plugin_apexrankwatch
 display_name: Apex Rank Watch
 version: 2.0.0
 author: moeneri
-description: 查询 Apex 玩家段位、地图轮换、当前赛季结束时间与猎杀线，支持群内持续监控、图片化输出与脱敏调试。
+description: 查询 Apex 玩家段位、地图轮换、当前赛季结束时间与猎杀线，支持群内持续监控与图片化输出。
 repo: https://github.com/moeneri/astrbot_plugin_apexrankwatch
 license: MIT
 astrbot_version: ">=4.16,<5"
