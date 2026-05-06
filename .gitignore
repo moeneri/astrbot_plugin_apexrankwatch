@@ -11,3 +11,14 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+_generated/
+data/
+settings.json
+groups.json
+player_rank_cards/
+rank_change_cards/
+season_cards/
+map_cards/
+predator_cards/
+*.zip
+*.log

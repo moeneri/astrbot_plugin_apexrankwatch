@@ -1,0 +1,82 @@
+{
+  "rookie": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/rookie4.png",
+    "file": "rookie.png",
+    "name": "Rookie",
+    "zh_name": "菜鸟",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "bronze": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/bronze4.png",
+    "file": "bronze.png",
+    "name": "Bronze",
+    "zh_name": "青铜",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "silver": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/silver4.png",
+    "file": "silver.png",
+    "name": "Silver",
+    "zh_name": "白银",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "gold": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/gold4.png",
+    "file": "gold.png",
+    "name": "Gold",
+    "zh_name": "黄金",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "platinum": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/platinum4.png",
+    "file": "platinum.png",
+    "name": "Platinum",
+    "zh_name": "白金",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "diamond": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/diamond4.png",
+    "file": "diamond.png",
+    "name": "Diamond",
+    "zh_name": "钻石",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "master": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/master.png",
+    "file": "master.png",
+    "name": "Master",
+    "zh_name": "大师",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "predator": {
+    "source": "https://apexlegends.wiki.gg/images/Apex_Predators.svg?909755",
+    "file": "predator.png",
+    "name": "Apex Predator",
+    "zh_name": "猎杀",
+    "size": [
+      256,
+      256
+    ]
+  }
+}

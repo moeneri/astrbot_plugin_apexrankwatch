@@ -25,6 +25,8 @@ APEX_API_PORTAL_URL = "https://portal.apexlegendsapi.com/"
 APEX_API_VERIFY_URL = "https://portal.apexlegendsapi.com/discord-auth"
 APEX_SEASONS_HOME_URL = "https://apexseasons.online/"
 ESPORTSTALES_SEASONS_URL = "https://www.esportstales.com/apex-legends/season-end-date"
+APEX_STATUS_SEASON_COUNTDOWN_URL = "https://apexlegendsstatus.com/new-season-countdown"
+APEX_STATUS_SEASON_DURATION_DAYS = 91
 
 JSONLD_SCRIPT_RE = re.compile(
     r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
@@ -67,10 +69,15 @@ SPLIT_LINE_RE = re.compile(
 )
 MONTH_DAY_RE = re.compile(r"([A-Za-z]{3,9})\s+(\d{1,2})(?:,\s*(\d{4}))?")
 FUZZY_DATE_TOKEN_RE = re.compile(r"/|around|approx|estimate|estimated", re.IGNORECASE)
+APEX_STATUS_START_TIME_RE = re.compile(r"\bstartTime\s*=\s*(\d{9,12})\b", re.IGNORECASE)
+APEX_STATUS_SEASON_TITLE_RE = re.compile(
+    r"Countdown\s+to\s+Season\s+(\d+)(?:\s*:\s*([^\"<\n\r]+))?",
+    re.IGNORECASE,
+)
 
 
 NAME_MAP: dict[str, str] = {
-    # Rank
+    # 段位
     "Unranked": "菜鸟",
     "Bronze": "青铜",
     "Silver": "白银",
@@ -79,7 +86,7 @@ NAME_MAP: dict[str, str] = {
     "Diamond": "钻石",
     "Master": "大师",
     "Apex Predator": "Apex 猎杀者",
-    # States
+    # 状态
     "offline": "离线",
     "online": "在线",
     "inLobby": "在大厅",
@@ -94,7 +101,7 @@ NAME_MAP: dict[str, str] = {
     "Online": "在线",
     "true": "是",
     "false": "否",
-    # Legends
+    # 英雄
     "Bloodhound": "寻血猎犬",
     "Gibraltar": "直布罗陀",
     "Lifeline": "命脉",
@@ -122,7 +129,16 @@ NAME_MAP: dict[str, str] = {
     "Conduit": "导管",
     "Alter": "变幻",
     "Sparrow": "琉雀",
-    # Stat names
+    "Axle": "艾克赛尔",
+    # 地图
+    "Broken Moon": "破碎月球",
+    "Kings Canyon": "诸王峡谷",
+    "Olympus": "奥林匹斯",
+    "Storm Point": "风暴点",
+    "World's Edge": "世界尽头",
+    "Worlds Edge": "世界尽头",
+    "E-District": "E-District",
+    # 统计项
     "BR Kills": "击杀数",
     "BR Wins": "胜场数",
     "BR Damage": "造成伤害",
@@ -153,6 +169,51 @@ class ApexPlayerStats:
     current_state: str
     is_in_lobby_or_match: bool
     platform: str
+
+
+@dataclass
+class MapRotationEntry:
+    map_name: str
+    map_name_zh: str
+    start_timestamp: int
+    end_timestamp: int
+    readable_start: str
+    readable_end: str
+    duration_secs: int
+    duration_minutes: int
+    asset: str
+    code: str
+    remaining_secs: int | None = None
+    remaining_mins: int | None = None
+    remaining_timer: str = ""
+
+
+@dataclass
+class MapRotationMode:
+    current: MapRotationEntry | None = None
+    next: MapRotationEntry | None = None
+
+
+@dataclass
+class MapRotationInfo:
+    battle_royale: MapRotationMode = field(default_factory=MapRotationMode)
+    ranked: MapRotationMode = field(default_factory=MapRotationMode)
+    ltm: MapRotationMode = field(default_factory=MapRotationMode)
+
+
+@dataclass
+class PredatorPlatformStats:
+    platform: str
+    threshold_rp: int
+    found_rank: int
+    uid: str
+    update_timestamp: int
+    masters_and_preds: int
+
+
+@dataclass
+class PredatorInfo:
+    platforms: dict[str, PredatorPlatformStats] = field(default_factory=dict)
 
 
 @dataclass
@@ -245,6 +306,29 @@ class ApiRateLimitError(ApexApiError):
 
 
 class ApexApiClient:
+    _SECRET_DEBUG_KEYS = {
+        "auth",
+        "authorization",
+        "api_key",
+        "apikey",
+        "token",
+        "secret",
+        "password",
+        "cookie",
+    }
+    _PRIVATE_DEBUG_KEYS = {
+        "uid",
+        "uuid",
+        "user_id",
+        "group_id",
+        "player",
+        "player_name",
+        "name",
+        "display_name",
+        "displayname",
+    }
+    _MAX_DEBUG_PAYLOAD_CHARS = 4000
+
     def __init__(
         self,
         api_key: str,
@@ -261,6 +345,11 @@ class ApexApiClient:
         self._season_cache_ttl_seconds = 30 * 60
         self._season_cache: dict[str, tuple[float, SeasonInfo]] = {}
         self._season_lock = asyncio.Lock()
+        self._live_cache_ttl_seconds = 60
+        self._map_rotation_cache: tuple[float, MapRotationInfo] | None = None
+        self._map_rotation_lock = asyncio.Lock()
+        self._predator_cache: tuple[float, PredatorInfo] | None = None
+        self._predator_lock = asyncio.Lock()
         self._split_index_cache: tuple[float, dict[int, list[_SplitTextRange]]] | None = None
         self._client = httpx.AsyncClient(
             timeout=self._timeout,
@@ -285,6 +374,40 @@ class ApexApiClient:
         data = await self._request_player_data(api_url, params, uid)
         return _parse_player_stats(data, platform, uid)
 
+    async def fetch_map_rotation_info(self) -> MapRotationInfo:
+        cached = self._get_cached_map_rotation()
+        if cached is not None:
+            return cached
+
+        async with self._map_rotation_lock:
+            cached = self._get_cached_map_rotation()
+            if cached is not None:
+                return cached
+
+            api_url = "https://api.mozambiquehe.re/maprotation"
+            params = {"auth": self._api_key, "version": 2}
+            data = await self._request_with_retry(api_url, params)
+            rotation_info = _parse_map_rotation_info(data)
+            self._map_rotation_cache = (time.monotonic(), rotation_info)
+            return rotation_info
+
+    async def fetch_predator_info(self) -> PredatorInfo:
+        cached = self._get_cached_predator()
+        if cached is not None:
+            return cached
+
+        async with self._predator_lock:
+            cached = self._get_cached_predator()
+            if cached is not None:
+                return cached
+
+            api_url = "https://api.mozambiquehe.re/predator"
+            params = {"auth": self._api_key}
+            data = await self._request_with_retry(api_url, params)
+            predator_info = _parse_predator_info(data)
+            self._predator_cache = (time.monotonic(), predator_info)
+            return predator_info
+
     async def fetch_player_stats_auto(
         self, identifier: str, platform: str | None = None, use_uid: bool = False
     ) -> tuple[ApexPlayerStats, str]:
@@ -302,6 +425,9 @@ class ApexApiClient:
         raise PlayerNotFoundError(f"Player not found: {identifier}")
 
     async def fetch_season_info(self, season_number: int | None = None) -> SeasonInfo:
+        if season_number is None:
+            return await self.fetch_current_season_info()
+
         cache_key = f"season:{season_number if season_number is not None else 'current'}"
         cached = self._get_cached_season(cache_key)
         if cached is not None:
@@ -348,7 +474,20 @@ class ApexApiClient:
             return season_info
 
     async def fetch_current_season_info(self) -> SeasonInfo:
-        return await self.fetch_season_info()
+        cache_key = "season:current"
+        cached = self._get_cached_season(cache_key)
+        if cached is not None:
+            return cached
+
+        async with self._season_lock:
+            cached = self._get_cached_season(cache_key)
+            if cached is not None:
+                return cached
+
+            html = await self._request_text_with_retry(APEX_STATUS_SEASON_COUNTDOWN_URL)
+            season_info = _parse_apex_status_current_season_info(html)
+            self._season_cache[cache_key] = (time.monotonic(), season_info)
+            return season_info
 
     async def _fetch_player(
         self, identifier: str, platform: str, use_uid: bool
@@ -488,18 +627,16 @@ class ApexApiClient:
     def _debug_log_error(self, kind: str, url: str, exc: Exception) -> None:
         if not self._debug_enabled:
             return
-        self._logger.error(f"[DEBUG] {kind} 异常 !! url={url}, error={exc}")
+        safe_error = self._sanitize_debug_text(str(exc))
+        self._logger.error(f"[DEBUG] {kind} 异常 !! url={url}, error={safe_error}")
 
-    @staticmethod
-    def _sanitize_mapping(value: dict[str, Any] | None) -> dict[str, Any]:
+    @classmethod
+    def _sanitize_mapping(cls, value: dict[str, Any] | None) -> dict[str, Any]:
         if not isinstance(value, dict):
             return {}
         sanitized: dict[str, Any] = {}
         for key, item in value.items():
-            if str(key).lower() in {"auth", "authorization", "api_key", "apikey", "token"}:
-                sanitized[key] = ApexApiClient._mask_secret(item)
-            else:
-                sanitized[key] = item
+            sanitized[key] = cls._sanitize_debug_payload(item, str(key))
         return sanitized
 
     @staticmethod
@@ -510,17 +647,79 @@ class ApexApiClient:
         return text[:3] + "*" * (len(text) - 6) + text[-3:]
 
     @staticmethod
-    def _serialize_debug_payload(payload: Any) -> str:
+    def _mask_identifier(value: Any) -> str:
+        text = str(value or "")
+        if not text:
+            return ""
+        if len(text) <= 4:
+            return "*" * len(text)
+        return text[:2] + "*" * max(3, len(text) - 4) + text[-2:]
+
+    @classmethod
+    def _sanitize_debug_payload(cls, payload: Any, key: str = "") -> Any:
+        lowered = str(key).lower()
+        if lowered in cls._SECRET_DEBUG_KEYS:
+            return cls._mask_secret(payload)
+        if lowered in cls._PRIVATE_DEBUG_KEYS:
+            return cls._mask_identifier(payload)
+        if isinstance(payload, dict):
+            return {
+                item_key: cls._sanitize_debug_payload(item_value, str(item_key))
+                for item_key, item_value in payload.items()
+            }
+        if isinstance(payload, list):
+            return [cls._sanitize_debug_payload(item) for item in payload]
+        if isinstance(payload, tuple):
+            return [cls._sanitize_debug_payload(item) for item in payload]
+        if isinstance(payload, str):
+            return cls._sanitize_debug_text(payload)
+        return payload
+
+    @classmethod
+    def _sanitize_debug_text(cls, value: str) -> str:
+        text = str(value or "")
+
+        def mask_secret_match(match: re.Match[str]) -> str:
+            return f"{match.group(1)}={cls._mask_secret(match.group(2))}"
+
+        def mask_private_match(match: re.Match[str]) -> str:
+            return f"{match.group(1)}={cls._mask_identifier(match.group(2))}"
+
+        text = re.sub(
+            r"(?i)\b(auth|authorization|api_key|apikey|token|secret|password|cookie)=([^&\s]+)",
+            mask_secret_match,
+            text,
+        )
+        text = re.sub(
+            r"(?i)\b(uid|uuid|user_id|group_id|player|player_name)=([^&\s]+)",
+            mask_private_match,
+            text,
+        )
+        text = re.sub(
+            r"(?i)(Bearer\s+)([A-Za-z0-9._~+/=-]{8,})",
+            lambda match: match.group(1) + cls._mask_secret(match.group(2)),
+            text,
+        )
+        text = re.sub(
+            r"(?<![A-Za-z0-9])[A-Fa-f0-9]{32,}(?![A-Za-z0-9])",
+            lambda match: cls._mask_secret(match.group(0)),
+            text,
+        )
+        return text
+
+    @classmethod
+    def _serialize_debug_payload(cls, payload: Any) -> str:
+        safe_payload = cls._sanitize_debug_payload(payload)
         try:
             text = (
-                payload
-                if isinstance(payload, str)
-                else json.dumps(payload, ensure_ascii=False)
+                safe_payload
+                if isinstance(safe_payload, str)
+                else json.dumps(safe_payload, ensure_ascii=False)
             )
         except Exception:
-            text = repr(payload)
-        if len(text) > 4000:
-            return text[:4000] + "...(truncated)"
+            text = repr(safe_payload)
+        if len(text) > cls._MAX_DEBUG_PAYLOAD_CHARS:
+            return text[: cls._MAX_DEBUG_PAYLOAD_CHARS] + "...(truncated)"
         return text
 
     async def _request_text_with_retry(self, url: str) -> str:
@@ -589,6 +788,26 @@ class ApexApiClient:
     def _retry_delay(attempt: int) -> int:
         return min(5, max(1, 2 ** (attempt - 1)))
 
+    def _get_cached_map_rotation(self) -> MapRotationInfo | None:
+        cached = self._map_rotation_cache
+        if not cached:
+            return None
+        saved_at, rotation_info = cached
+        if time.monotonic() - saved_at > self._live_cache_ttl_seconds:
+            self._map_rotation_cache = None
+            return None
+        return rotation_info
+
+    def _get_cached_predator(self) -> PredatorInfo | None:
+        cached = self._predator_cache
+        if not cached:
+            return None
+        saved_at, predator_info = cached
+        if time.monotonic() - saved_at > self._live_cache_ttl_seconds:
+            self._predator_cache = None
+            return None
+        return predator_info
+
 
 def _load_external_name_map() -> dict[str, str]:
     try:
@@ -638,6 +857,78 @@ def translate_state(state_text: Any) -> str:
     if time_info:
         translated += time_info
     return translated
+
+
+def _parse_map_rotation_info(data: Any) -> MapRotationInfo:
+    if not isinstance(data, dict):
+        return MapRotationInfo()
+
+    if any(key in data for key in ("battle_royale", "ranked", "ltm")):
+        return MapRotationInfo(
+            battle_royale=_parse_map_rotation_mode(data.get("battle_royale")),
+            ranked=_parse_map_rotation_mode(data.get("ranked")),
+            ltm=_parse_map_rotation_mode(data.get("ltm")),
+        )
+
+    return MapRotationInfo(
+        battle_royale=_parse_map_rotation_mode(data),
+    )
+
+
+def _parse_map_rotation_mode(data: Any) -> MapRotationMode:
+    if not isinstance(data, dict):
+        return MapRotationMode()
+    return MapRotationMode(
+        current=_parse_map_rotation_entry(data.get("current")),
+        next=_parse_map_rotation_entry(data.get("next")),
+    )
+
+
+def _parse_map_rotation_entry(data: Any) -> MapRotationEntry | None:
+    if not isinstance(data, dict):
+        return None
+
+    map_name = str(data.get("map") or "").strip() or "未知"
+    return MapRotationEntry(
+        map_name=map_name,
+        map_name_zh=translate(map_name),
+        start_timestamp=_to_int(data.get("start")) or 0,
+        end_timestamp=_to_int(data.get("end")) or 0,
+        readable_start=str(data.get("readableDate_start") or ""),
+        readable_end=str(data.get("readableDate_end") or ""),
+        duration_secs=_to_int(data.get("DurationInSecs")) or 0,
+        duration_minutes=_to_int(data.get("DurationInMinutes")) or 0,
+        asset=str(data.get("asset") or ""),
+        code=str(data.get("code") or ""),
+        remaining_secs=_to_int(data.get("remainingSecs")),
+        remaining_mins=_to_int(data.get("remainingMins")),
+        remaining_timer=str(data.get("remainingTimer") or ""),
+    )
+
+
+def _parse_predator_info(data: Any) -> PredatorInfo:
+    if not isinstance(data, dict):
+        return PredatorInfo()
+
+    rp_data = data.get("RP", {})
+    if not isinstance(rp_data, dict):
+        return PredatorInfo()
+
+    platforms: dict[str, PredatorPlatformStats] = {}
+    for platform in ("PC", "PS4", "X1", "SWITCH"):
+        raw = rp_data.get(platform)
+        if not isinstance(raw, dict):
+            continue
+        platforms[platform] = PredatorPlatformStats(
+            platform=platform,
+            threshold_rp=_to_int(raw.get("val")) or 0,
+            found_rank=_to_int(raw.get("foundRank")) or 0,
+            uid=str(raw.get("uid") or ""),
+            update_timestamp=_to_int(raw.get("updateTimestamp")) or 0,
+            masters_and_preds=_to_int(raw.get("totalMastersAndPreds")) or 0,
+        )
+
+    return PredatorInfo(platforms=platforms)
 
 
 def is_score_drop_abnormal(old_score: int, new_score: int) -> bool:
@@ -854,6 +1145,73 @@ def _parse_season_name(text: str) -> tuple[int | None, str]:
     return number, name
 
 
+def _parse_apex_status_current_season_info(
+    html: str, now: datetime | None = None
+) -> SeasonInfo:
+    target_timestamp = _extract_apex_status_start_timestamp(html)
+    if target_timestamp is None:
+        raise RuntimeError("无法从 Apex Legends Status 页面提取赛季时间戳")
+
+    target_number, target_name = _extract_apex_status_season_title(html)
+    target_dt = datetime.fromtimestamp(target_timestamp, tz=timezone.utc)
+    now_dt = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
+
+    if target_number is not None and now_dt < target_dt:
+        # 倒计时还没结束时，时间戳就是当前赛季结束、下一赛季开始的时刻。
+        season_number = max(1, target_number - 1)
+        season_name = ""
+        start_dt = target_dt - timedelta(days=APEX_STATUS_SEASON_DURATION_DAYS)
+        end_dt = target_dt
+    else:
+        # 倒计时已到达时，页面标题对应当前赛季；按常规 13 周赛季长度推算结束。
+        season_number = target_number
+        season_name = target_name
+        start_dt = target_dt
+        end_dt = target_dt + timedelta(days=APEX_STATUS_SEASON_DURATION_DAYS)
+
+    start_iso = _to_iso_datetime(start_dt)
+    end_iso = _to_iso_datetime(end_dt)
+    return SeasonInfo(
+        season_number=season_number,
+        season_name=season_name,
+        start_date=_format_iso_date(start_iso),
+        end_date=_format_iso_date(end_iso),
+        timezone="Asia/Shanghai",
+        update_time_hint="Apex Legends Status countdown 时间戳",
+        source="apexlegendsstatus.com",
+        season_url=APEX_STATUS_SEASON_COUNTDOWN_URL,
+        start_iso=start_iso,
+        end_iso=end_iso,
+        status_text=_resolve_season_status(start_iso, end_iso),
+        supports_ranked_splits=False,
+    )
+
+
+def _extract_apex_status_start_timestamp(html: str) -> int | None:
+    match = APEX_STATUS_START_TIME_RE.search(html or "")
+    if not match:
+        return None
+    return _to_int(match.group(1))
+
+
+def _extract_apex_status_season_title(html: str) -> tuple[int | None, str]:
+    matches = list(APEX_STATUS_SEASON_TITLE_RE.finditer(unescape(html or "")))
+    if not matches:
+        return None, ""
+    match = next((item for item in matches if item.group(2)), matches[0])
+    number = _to_int(match.group(1))
+    name = re.sub(r"\s+", " ", match.group(2) or "").strip(" -:|")
+    return number, name
+
+
+def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _build_season_info(
     reference: _SeasonReference,
     home_html: str,
@@ -986,8 +1344,10 @@ def _format_iso_date(value: str) -> str:
             value = value.replace("Z", "+00:00")
         dt = datetime.fromisoformat(value)
         if dt.tzinfo:
-            return dt.strftime("%Y-%m-%d %H:%M %Z").strip()
-        return dt.strftime("%Y-%m-%d %H:%M")
+            dt = dt.astimezone(SHANGHAI_TZ)
+        else:
+            dt = dt.replace(tzinfo=SHANGHAI_TZ)
+        return dt.strftime("%Y-%m-%d %H:%M 北京时间")
     except Exception:
         return value
 

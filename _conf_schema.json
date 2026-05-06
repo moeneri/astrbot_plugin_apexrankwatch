@@ -7,7 +7,7 @@
     "default": ""
   },
   "debug_logging": {
-    "description": "是否开启调试日志（记录请求参数与返回数据，默认关闭）",
+    "description": "是否开启调试日志（记录脱敏后的请求参数与返回数据，默认关闭）",
     "type": "bool",
     "default": false
   },
@@ -34,25 +34,25 @@
   "blacklist": {
     "description": "黑名单 ID 列表",
     "type": "string",
-    "hint": "多个 ID 用中英文逗号分隔，例如：moeneri,moeneri2\nUID 示例：uid:1010153800824",
+    "hint": "多个 ID 用中英文逗号分隔，例如：player_a,player_b\nUID 示例：uid:0000000000000",
     "default": ""
   },
   "query_blocklist": {
     "description": "禁止查询的玩家ID列表",
     "type": "string",
-    "hint": "多个ID用中英文逗号分隔，例如：moeneri,moeneri2\nUID 示例：uid:1010153800824",
+    "hint": "多个ID用中英文逗号分隔，例如：player_a,player_b\nUID 示例：uid:0000000000000",
     "default": ""
   },
   "user_blacklist": {
     "description": "禁止使用的QQ号列表",
     "type": "string",
-    "hint": "多个QQ号用中英文逗号分隔，例如：12345,67890",
+    "hint": "多个QQ号用中英文逗号分隔，例如：100001,100002",
     "default": ""
   },
   "owner_qq": {
     "description": "主人QQ号（拥有最大权限，可多个）",
     "type": "string",
-    "hint": "多个QQ号用中英文逗号分隔，例如：12345,67890",
+    "hint": "多个QQ号用中英文逗号分隔，例如：100001,100002",
     "default": ""
   },
   "whitelist_enabled": {
@@ -63,7 +63,7 @@
   "whitelist_groups": {
     "description": "允许使用的群ID白名单",
     "type": "string",
-    "hint": "多个群ID用中英文逗号分隔，例如：group1,group2",
+    "hint": "多个群ID用中英文逗号分隔，例如：group_a,group_b",
     "default": ""
   },
   "allow_private": {
