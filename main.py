@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,12 +12,21 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 import astrbot.api.message_components as Comp
 from astrbot.api.star import Context, Star, StarTools
 
+try:
+    from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
+except Exception:
+    Image = ImageDraw = ImageFilter = ImageFont = ImageOps = None
+
 if __package__:
     from .apex_service import (
         ApexApiClient,
         ApexApiError,
         ApexPlayerStats,
+        MapRotationEntry,
+        MapRotationInfo,
         PlayerNotFoundError,
+        PredatorInfo,
+        PredatorPlatformStats,
         SeasonInfo,
         is_likely_season_reset,
         is_score_drop_abnormal,
@@ -29,7 +39,11 @@ else:
         ApexApiClient,
         ApexApiError,
         ApexPlayerStats,
+        MapRotationEntry,
+        MapRotationInfo,
         PlayerNotFoundError,
+        PredatorInfo,
+        PredatorPlatformStats,
         SeasonInfo,
         is_likely_season_reset,
         is_score_drop_abnormal,
@@ -101,23 +115,51 @@ class PollFetchResult:
 
 
 class Main(Star):
+    _PLUGIN_ROOT = Path(__file__).resolve().parent
+    _MAP_ASSET_DIR = _PLUGIN_ROOT / "assets" / "maps"
+    _RANK_ICON_DIR = _PLUGIN_ROOT / "assets" / "ranks"
+    _LEGEND_ICON_DIR = _PLUGIN_ROOT / "assets" / "legends"
+    _STATUS_BADGE_DIR = _PLUGIN_ROOT / "assets" / "status"
+    _DEFAULT_USER_AVATAR_PATH = _PLUGIN_ROOT / "assets" / "default_user_avatar.png"
+    _PREDATOR_TEMPLATE_PATH = _PLUGIN_ROOT / "assets" / "predator_template.png"
+    _MAP_CARD_SIZE = (900, 320)
+    _MAP_CURRENT_HEIGHT = 212
+    _MAP_IMAGE_CACHE_TTL_SECONDS = 60
+    _SEASON_CARD_SIZE = (900, 320)
+    _SEASON_IMAGE_CACHE_TTL_SECONDS = 60
+    _RANK_CHANGE_CARD_SIZE = (1122, 1402)
+    _PLAYER_RANK_CARD_SIZE = (1122, 1402)
+    _PREDATOR_IMAGE_CACHE_TTL_SECONDS = 60
+    _PREDATOR_GREEN = (88, 210, 126, 255)
+    _PREDATOR_DEEP_RED = (158, 31, 36, 255)
+    _PREDATOR_NEUTRAL = (246, 241, 232, 255)
+
     _KEYWORD_COMMAND_BLOCKLIST = {
-        # English commands
+        # 英文指令
         "apexrank",
         "apexrankwatch",
         "apexranklist",
         "apexrankremove",
         "apexseason",
+        "apexpredator",
+        "map",
+        "apexmap",
+        "apexrankmap",
         "apextest",
         "apexhelp",
         "apex帮助",
         "apexrankhelp",
         "apexblacklist",
-        # CN aliases
+        # 中文别名
         "apex监控",
         "apex列表",
         "apex移除",
         "apex查询",
+        "地图",
+        "排位地图",
+        "匹配地图",
+        "apex猎杀",
+        "猎杀",
         "视奸",
         "持续视奸",
         "取消持续视奸",
@@ -127,7 +169,7 @@ class Main(Star):
         "apex黑名单",
         "不准视奸",
         "apexban",
-        # Season keyword switches
+        # 赛季关键词开关
         "赛季关闭",
         "赛季开启",
     }
@@ -334,7 +376,7 @@ class Main(Star):
     def _format_passive_text(self, event: AstrMessageEvent, text: str) -> str:
         if not text:
             return ""
-        # Fallback for adapters that strip leading newlines/spaces.
+        # 兼容会裁剪开头换行或空格的适配器。
         group_id = self._get_group_id(event)
         if group_id and self._event_mentions_me(event):
             return "\u200b\n" + text.lstrip("\n")
@@ -384,7 +426,7 @@ class Main(Star):
             return text
 
     def _prefer_quote_reply(self, event: AstrMessageEvent) -> bool:
-        # "引用回复" is supported by QQ 个人号（aiocqhttp / OneBot v11）.
+        # QQ 个人号（aiocqhttp / OneBot v11）支持引用回复。
         try:
             return str(event.get_platform_name() or "").lower() == "aiocqhttp"
         except Exception:
@@ -396,11 +438,19 @@ class Main(Star):
         if self._prefer_quote_reply(event):
             reply_id = self._coerce_reply_id(self._get_reply_message_id(event))
             if reply_id is not None:
-                # Use QQ 引用回复 instead of @mentioning the sender.
+                # QQ 个人号优先使用引用回复，避免频繁 @ 用户。
                 return event.chain_result(
                     [Comp.Reply(id=reply_id), Comp.Plain(text=text.lstrip("\n"))]
                 )
         return event.plain_result(self._format_passive_text(event, text))
+
+    def _image(self, event: AstrMessageEvent, path: Path):
+        image = Comp.Image.fromFileSystem(str(path))
+        if self._prefer_quote_reply(event):
+            reply_id = self._coerce_reply_id(self._get_reply_message_id(event))
+            if reply_id is not None:
+                return event.chain_result([Comp.Reply(id=reply_id), image])
+        return event.chain_result([image])
 
     @staticmethod
     def _parse_list(raw: str) -> set[str]:
@@ -648,6 +698,18 @@ class Main(Star):
             logger.error(f"发送群消息失败: {exc}")
             return False
 
+    async def _send_active_image(self, origin: str, path: Path) -> bool:
+        if not origin:
+            logger.warning("会话标识缺失，无法发送图片通知")
+            return False
+        try:
+            chain = MessageChain().file_image(str(path))
+            await self.context.send_message(origin, chain)
+            return True
+        except Exception as exc:
+            logger.error(f"发送群图片失败: {exc}")
+            return False
+
     def _parse_identifier(self, player_name: str) -> tuple[str, bool]:
         name = player_name.strip()
         lowered = name.lower()
@@ -754,7 +816,7 @@ class Main(Star):
             "——",
             "【查询】",
             "/apexrank <玩家|uid:...> [平台]  别名：/apex查询 /视奸",
-            "例：/apexrank moeneri pc",
+            "例：/apexrank PlayerName pc",
             "——",
             "【监控（群聊）】",
             "/apexrankwatch <玩家|uid:...> [平台]  别名：/apex监控 /持续视奸",
@@ -763,6 +825,9 @@ class Main(Star):
             "——",
             "【信息】",
             "/apexseason [赛季号]  别名：/apex赛季 /新赛季",
+            "/map  别名：/地图 /排位地图 /apexmap /apexrankmap（排位地图轮换）",
+            "/匹配地图（三人赛地图轮换）",
+            "/apexpredator [平台]  别名：/apex猎杀 /猎杀",
             "例：/apexseason 28  或  /apexseason current",
             "关键词：消息包含「赛季」自动回复（/赛季关闭，/赛季开启）",
             "——",
@@ -771,7 +836,7 @@ class Main(Star):
             "——",
             "【参数】",
             "平台：PC / PS4 / X1 / SWITCH（默认 PC；PC 无数据自动尝试其他平台）",
-            "UUID：使用 uid: 或 uuid: 前缀（例：/apexrank uid:123456）",
+            "UUID：使用 uid: 或 uuid: 前缀（例：/apexrank uid:000000）",
             "——",
             f"⏱️ 监控间隔：{self._config.check_interval} 分钟",
             f"🔻 最小有效分：{self._config.min_valid_score} 分",
@@ -805,7 +870,7 @@ class Main(Star):
         player_name, platform = self._parse_player_platform(event, player_name, platform)
         if not player_name:
             yield self._plain(event, 
-                "\n".join([self._time_line(), "⚠️ 请提供玩家名称，例如: /apexrank moeneri"])
+                "\n".join([self._time_line(), "⚠️ 请提供玩家名称，例如: /apexrank PlayerName"])
             )
             return
 
@@ -867,7 +932,123 @@ class Main(Star):
             return
 
         player_data.platform = used_platform
-        yield self._plain(event, self._format_player_rank_text(player_data))
+        try:
+            image_path = self._render_player_rank_image(player_data)
+            yield self._image(event, image_path)
+        except Exception as exc:
+            logger.error(f"生成玩家段位信息图片失败: {exc}")
+            yield self._plain(event, self._format_player_rank_text(player_data))
+
+    @filter.command("map", alias={"地图", "排位地图", "apexmap", "apexrankmap"})
+    async def apexmap(self, event: AstrMessageEvent):
+        deny = self._guard_access(event)
+        if deny:
+            yield self._plain(event, "\n".join([self._time_line(), deny]))
+            return
+
+        if not self._config.api_key:
+            yield self._plain(event, self._missing_api_key_text())
+            return
+
+        try:
+            rotation_info = await self._api.fetch_map_rotation_info()
+        except ApexApiError as exc:
+            logger.error(f"地图轮换查询失败: {exc}")
+            yield self._plain(event, self._api_request_failed_text("地图轮换查询", exc))
+            return
+        except Exception as exc:
+            logger.error(f"地图轮换查询失败: {exc}")
+            yield self._plain(event, self._api_request_failed_text("地图轮换查询"))
+            return
+
+        try:
+            image_path = self._render_map_rotation_image(rotation_info)
+            yield self._image(event, image_path)
+        except Exception as exc:
+            logger.error(f"地图轮换图片生成失败，已回退文字输出: {exc}")
+            yield self._plain(event, self._format_map_rotation_text(rotation_info))
+
+    @filter.command("匹配地图")
+    async def apexmatchmap(self, event: AstrMessageEvent):
+        deny = self._guard_access(event)
+        if deny:
+            yield self._plain(event, "\n".join([self._time_line(), deny]))
+            return
+
+        if not self._config.api_key:
+            yield self._plain(event, self._missing_api_key_text())
+            return
+
+        try:
+            rotation_info = await self._api.fetch_map_rotation_info()
+        except ApexApiError as exc:
+            logger.error(f"匹配地图轮换查询失败: {exc}")
+            yield self._plain(event, self._api_request_failed_text("匹配地图轮换查询", exc))
+            return
+        except Exception as exc:
+            logger.error(f"匹配地图轮换查询失败: {exc}")
+            yield self._plain(event, self._api_request_failed_text("匹配地图轮换查询"))
+            return
+
+        try:
+            image_path = self._render_map_rotation_image(
+                rotation_info, mode="battle_royale"
+            )
+            yield self._image(event, image_path)
+        except Exception as exc:
+            logger.error(f"匹配地图轮换图片生成失败，已回退文字输出: {exc}")
+            yield self._plain(
+                event,
+                self._format_map_rotation_text(rotation_info, mode="battle_royale"),
+            )
+
+    @filter.command("apexpredator", alias={"apex猎杀", "猎杀"})
+    async def apexpredator(self, event: AstrMessageEvent, platform: str = ""):
+        deny = self._guard_access(event)
+        if deny:
+            yield self._plain(event, "\n".join([self._time_line(), deny]))
+            return
+
+        if not self._config.api_key:
+            yield self._plain(event, self._missing_api_key_text())
+            return
+
+        raw_platform = (self._extract_command_args(event) or platform or "").strip()
+        selected_platform = ""
+        if raw_platform:
+            if not self._is_platform_token(raw_platform):
+                yield self._plain(
+                    event,
+                    "\n".join(
+                        [
+                            self._time_line(),
+                            "⚠️ 平台仅支持 PC / PS4 / X1 / SWITCH",
+                            "例：/apexpredator pc  或  /猎杀",
+                        ]
+                    ),
+                )
+                return
+            selected_platform = self._normalize_platform(raw_platform)
+
+        try:
+            predator_info = await self._api.fetch_predator_info()
+        except ApexApiError as exc:
+            logger.error(f"猎杀线查询失败: {exc}")
+            yield self._plain(event, self._api_request_failed_text("猎杀线查询", exc))
+            return
+        except Exception as exc:
+            logger.error(f"猎杀线查询失败: {exc}")
+            yield self._plain(event, self._api_request_failed_text("猎杀线查询"))
+            return
+
+        try:
+            image_path = self._render_predator_info_image(predator_info)
+            yield self._image(event, image_path)
+        except Exception as exc:
+            logger.error(f"猎杀线图片生成失败，已回退文字输出: {exc}")
+            yield self._plain(
+                event, self._format_predator_info_text(predator_info, selected_platform)
+            )
 
     @filter.command("apexseason")
     async def apexseason(self, event: AstrMessageEvent, season: str = ""):
@@ -894,7 +1075,12 @@ class Main(Star):
             )
             return
 
-        yield self._plain(event, self._format_season_info(season_info))
+        try:
+            image_path = self._render_season_info_image(season_info)
+            yield self._image(event, image_path)
+        except Exception as exc:
+            logger.error(f"赛季图片生成失败，已回退文字输出: {exc}")
+            yield self._plain(event, self._format_season_info(season_info))
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def _season_keyword_listener(self, event: AstrMessageEvent):
@@ -906,7 +1092,7 @@ class Main(Star):
             return
         first = raw.split(maxsplit=1)[0].lstrip("/").lstrip("／").strip()
         if first and first.lower() in self._KEYWORD_COMMAND_BLOCKLIST:
-            # Avoid double trigger: command + keyword listener.
+            # 避免同一条消息同时触发指令和关键词监听。
             return
         if "赛季" not in raw:
             return
@@ -923,6 +1109,15 @@ class Main(Star):
         except Exception as exc:
             logger.error(f"赛季时间查询失败: {exc}")
             return
+
+        try:
+            image_path = self._render_season_info_image(season_info)
+            yield self._image(event, image_path)
+            if group_id:
+                yield self._plain(event, "🔕 关闭赛季关键词回复：/赛季关闭")
+            return
+        except Exception as exc:
+            logger.error(f"赛季关键词图片生成失败，已回退文字输出: {exc}")
 
         message = self._format_season_info(season_info)
         if group_id:
@@ -986,7 +1181,7 @@ class Main(Star):
         if not player_name:
             yield self._plain(event, 
                 "\n".join(
-                    [self._time_line(), "⚠️ 请提供要监控的玩家名称，例如: /apexrankwatch moeneri"]
+                    [self._time_line(), "⚠️ 请提供要监控的玩家名称，例如: /apexrankwatch PlayerName"]
                 )
             )
             return
@@ -1164,7 +1359,7 @@ class Main(Star):
         if not player_name:
             yield self._plain(event, 
                 "\n".join(
-                    [self._time_line(), "⚠️ 请提供要移除监控的玩家名称，例如: /apexrankremove moeneri"]
+                    [self._time_line(), "⚠️ 请提供要移除监控的玩家名称，例如: /apexrankremove PlayerName"]
                 )
             )
             return
@@ -1202,7 +1397,7 @@ class Main(Star):
                 "\n".join(
                     [
                         self._time_line(),
-                        "⚠️ 检测到同名多平台监控，请指定平台，例如: /apexrankremove moeneri pc",
+                        "⚠️ 检测到同名多平台监控，请指定平台，例如: /apexrankremove PlayerName pc",
                     ]
                 )
             )
@@ -1277,7 +1472,7 @@ class Main(Star):
         items = self._split_blacklist_items(player_name)
         if not items:
             yield self._plain(event, 
-                "\n".join([self._time_line(), "⚠️ 请提供玩家ID，例如：/apexblacklist add moeneri"])
+                "\n".join([self._time_line(), "⚠️ 请提供玩家ID，例如：/apexblacklist add PlayerName"])
             )
             return
 
@@ -1607,9 +1802,24 @@ class Main(Star):
                     message_lines.append(f"🎯 当前状态: {player_data.current_state}")
 
                 if result.group_origin:
-                    await self._send_active_message(
-                        result.group_origin, "\n".join(message_lines)
-                    )
+                    sent_image = False
+                    try:
+                        image_path = self._render_rank_change_image(
+                            player_data=player_data,
+                            old_score=old_score,
+                            new_score=new_score,
+                            platform=platform,
+                            is_season_reset=is_season_reset,
+                        )
+                        sent_image = await self._send_active_image(
+                            result.group_origin, image_path
+                        )
+                    except Exception as exc:
+                        logger.error(f"排位分数变化图片生成失败，已回退文字通知: {exc}")
+                    if not sent_image:
+                        await self._send_active_message(
+                            result.group_origin, "\n".join(message_lines)
+                        )
                 else:
                     logger.warning(f"群 {result.group_id} 缺少 unified_msg_origin，无法主动推送通知")
             elif not is_valid_score:
@@ -1661,16 +1871,2183 @@ class Main(Star):
             lines.append("🎮 在线状态: 在线")
             if player_data.selected_legend:
                 lines.append(f"🎯 当前英雄: {player_data.selected_legend}")
-                if player_data.legend_kills_rank:
-                    lines.append(
-                        f"📊 击杀排名: 全球 {player_data.legend_kills_rank.global_percent}%"
-                    )
             if player_data.is_in_lobby_or_match:
                 lines.append(f"🎯 当前状态: {player_data.current_state}")
         else:
             lines.append("🎮 在线状态: 离线")
 
         return "\n".join(lines)
+
+    def _render_player_rank_image(self, player_data: ApexPlayerStats) -> Path:
+        if Image is None:
+            raise RuntimeError("缺少 Pillow，无法生成玩家段位信息图片")
+
+        output_dir = self._player_rank_card_output_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        image = self._build_player_rank_card(player_data)
+        output_path = output_dir / f"player_rank_{now_epoch_ms()}.png"
+        image.save(output_path, format="PNG", optimize=True)
+        self._cleanup_old_player_rank_cards(output_dir)
+        return output_path
+
+    def _player_rank_card_output_dir(self) -> Path:
+        data_dir = getattr(self, "_data_dir", None)
+        if data_dir is None:
+            return self._PLUGIN_ROOT / "_generated" / "player_rank_cards"
+        return Path(data_dir) / "player_rank_cards"
+
+    def _cleanup_old_player_rank_cards(self, output_dir: Path, keep: int = 16) -> None:
+        try:
+            files = sorted(
+                output_dir.glob("player_rank_*.png"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+            for file in files[keep:]:
+                file.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug(f"清理玩家段位信息缓存图片失败: {exc}")
+
+    def _build_player_rank_card(self, player_data: ApexPlayerStats):
+        width, height = self._PLAYER_RANK_CARD_SIZE
+        canvas = Image.new("RGBA", (width, height), (7, 8, 11, 255))
+        draw = ImageDraw.Draw(canvas)
+        self._draw_rank_change_background(canvas)
+        self._draw_rank_change_outer_frame(draw, width, height)
+        self._draw_player_rank_header(draw, width)
+        self._draw_rank_change_time_bar(draw)
+
+        rank_display = (
+            f"{player_data.rank_name} {player_data.rank_div}"
+            if player_data.rank_div
+            else player_data.rank_name or "未知"
+        )
+        status = player_data.current_state or ("在线" if player_data.is_online else "离线")
+        platform = self._format_platform(player_data.platform)
+        global_percent = self._format_rank_percent(player_data.global_rank_percent)
+        legend_name = player_data.selected_legend or "未知"
+
+        self._draw_player_profile_panel(draw, (54, 360, 518, 670), player_data)
+        self._draw_rank_badge_panel(
+            draw,
+            (536, 360, 1070, 670),
+            "当前段位",
+            rank_display,
+            player_data.rank_name,
+            player_data.rank_div,
+        )
+        self._draw_player_score_panel(draw, (54, 690, 1070, 1000), player_data, rank_display, global_percent)
+        self._draw_rank_detail_panel(
+            draw,
+            (54, 1010, 370, 1340),
+            "legend",
+            "当前英雄",
+            legend_name,
+        )
+        self._draw_rank_info_panel(
+            draw,
+            (376, 1010, 720, 1340),
+            "crown",
+            "等级",
+            str(player_data.level if player_data.level is not None else "未知"),
+            secondary_value=f"平台 {platform}",
+        )
+        self._draw_rank_status_panel(draw, (724, 1010, 1070, 1340), status)
+        return canvas.convert("RGB")
+
+    def _draw_player_rank_header(self, draw, width: int) -> None:
+        title_box = (54, 54, width - 54, 224)
+        self._draw_rank_panel_base(draw, title_box, fill=(12, 14, 19, 238), outline_alpha=150)
+        self._draw_player_card_icon(draw, (94, 82, 220, 190))
+        title = "Apex 玩家档案"
+        title_font = self._fit_font(draw, title, 78, 50, width - 310, bold=True)
+        self._draw_text_stroked(
+            draw,
+            (260, self._centered_text_y(draw, title, title_font, 68, 202)),
+            title,
+            title_font,
+            fill=(248, 248, 244, 255),
+            stroke_width=2,
+        )
+        draw.rectangle((508, 217, 620, 222), fill=(236, 48, 52, 220))
+
+    def _draw_player_card_icon(self, draw, box: tuple[int, int, int, int]) -> None:
+        left, top, right, bottom = box
+        red = (238, 62, 66, 255)
+        white = (230, 232, 229, 255)
+        self._draw_icon_octagon(draw, box)
+        cx = (left + right) // 2
+        cy = (top + bottom) // 2
+        draw.ellipse((cx - 22, cy - 42, cx + 22, cy + 2), fill=white)
+        draw.pieslice((cx - 54, cy - 6, cx + 54, cy + 78), 180, 360, fill=white)
+        draw.rectangle((cx - 54, cy + 36, cx + 54, cy + 78), fill=white)
+        draw.line((left + 18, bottom - 14, right - 14, top + 18), fill=red, width=8)
+        draw.polygon(
+            [(right - 14, top + 18), (right - 18, top + 50), (right - 46, top + 24)],
+            fill=red,
+        )
+
+    def _draw_player_profile_panel(
+        self,
+        draw,
+        box: tuple[int, int, int, int],
+        player_data: ApexPlayerStats,
+    ) -> None:
+        self._draw_rank_panel_base(draw, box, fill=(13, 16, 21, 240), outline_alpha=105)
+        avatar_box = (box[0] + 38, box[1] + 48, box[0] + 192, box[1] + 202)
+        self._draw_icon_octagon(draw, avatar_box)
+        if self._DEFAULT_USER_AVATAR_PATH.exists():
+            self._draw_image_asset(draw, self._DEFAULT_USER_AVATAR_PATH, avatar_box, clip_octagon=True)
+        else:
+            self._draw_rank_icon(draw, "player", avatar_box)
+
+        label_font = self._font(30, bold=True)
+        name = player_data.name or "未知"
+        name_font = self._fit_font(draw, name, 54, 34, box[2] - box[0] - 245, bold=True)
+        uid_text = f"UID {player_data.uid}" if player_data.uid else "UID 未知"
+        uid_font = self._fit_font(draw, uid_text, 27, 20, box[2] - box[0] - 245)
+        text_left = box[0] + 220
+        text_right = box[2] - 24
+        self._draw_centered_stroked_text(
+            draw,
+            "玩家信息",
+            label_font,
+            text_left,
+            text_right,
+            box[1] + 48,
+            box[1] + 92,
+            (190, 192, 196, 255),
+        )
+        self._draw_centered_stroked_text(
+            draw,
+            name,
+            name_font,
+            text_left,
+            text_right,
+            box[1] + 112,
+            box[1] + 174,
+            (250, 250, 246, 255),
+            stroke_width=2,
+        )
+        self._draw_centered_stroked_text(
+            draw,
+            uid_text,
+            uid_font,
+            text_left,
+            text_right,
+            box[1] + 192,
+            box[1] + 236,
+            (170, 176, 186, 255),
+        )
+        draw.rectangle((text_left + 22, box[3] - 38, text_right - 22, box[3] - 32), fill=(221, 48, 52, 185))
+
+    def _draw_player_score_panel(
+        self,
+        draw,
+        box: tuple[int, int, int, int],
+        player_data: ApexPlayerStats,
+        rank_display: str,
+        global_percent: str,
+    ) -> None:
+        self._draw_rank_panel_base(draw, box, fill=(13, 15, 19, 244), outline_alpha=135)
+        draw.line((box[0] + 362, box[1] + 24, box[0] + 310, box[3] - 24), fill=(154, 40, 44, 86), width=2)
+        draw.line((box[2] - 362, box[1] + 24, box[2] - 310, box[3] - 24), fill=(154, 40, 44, 86), width=2)
+
+        score = self._format_rank_score_number(player_data.rank_score)
+        score_font = self._fit_font(draw, score, 150, 96, 620, bold=True)
+        rank_font = self._fit_font(draw, rank_display or "未知", 38, 26, 300, bold=True)
+        label_font = self._font(34, bold=True)
+        percent_font = self._fit_font(draw, global_percent or "未知", 34, 22, 250, bold=True)
+        left = box[0] + 34
+        right = box[2] - 34
+        self._draw_centered_stroked_text(
+            draw,
+            "段位分数",
+            label_font,
+            box[0],
+            box[2],
+            box[1] + 42,
+            box[1] + 92,
+            (190, 192, 196, 255),
+        )
+        self._draw_centered_stroked_text(
+            draw,
+            score,
+            score_font,
+            box[0] + 160,
+            box[2] - 160,
+            box[1] + 98,
+            box[1] + 230,
+            (250, 250, 246, 255),
+            stroke_width=2,
+        )
+        self._draw_centered_stroked_text(
+            draw,
+            "当前段位",
+            self._font(28, bold=True),
+            left,
+            left + 300,
+            box[3] - 76,
+            box[3] - 38,
+            (190, 192, 196, 255),
+        )
+        self._draw_centered_stroked_text(
+            draw,
+            rank_display or "未知",
+            rank_font,
+            left + 250,
+            left + 570,
+            box[3] - 80,
+            box[3] - 34,
+            (250, 250, 246, 255),
+            stroke_width=2,
+        )
+        self._draw_centered_stroked_text(
+            draw,
+            f"全球前 {global_percent}" if global_percent and global_percent != "未知" else "全球排名未知",
+            percent_font,
+            right - 280,
+            right,
+            box[3] - 82,
+            box[3] - 34,
+            (214, 218, 224, 255),
+        )
+        draw.rectangle((box[0] + 24, box[3] - 28, box[0] + 296, box[3] - 22), fill=(221, 48, 52, 185))
+        draw.rectangle((box[2] - 296, box[3] - 28, box[2] - 24, box[3] - 22), fill=(221, 48, 52, 185))
+
+    def _render_rank_change_image(
+        self,
+        player_data: ApexPlayerStats,
+        old_score: int,
+        new_score: int,
+        platform: str,
+        is_season_reset: bool = False,
+    ) -> Path:
+        if Image is None:
+            raise RuntimeError("缺少 Pillow，无法生成排位分数变化图片")
+
+        output_dir = self._rank_change_card_output_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        image = self._build_rank_change_card(
+            player_data=player_data,
+            old_score=old_score,
+            new_score=new_score,
+            platform=platform,
+            is_season_reset=is_season_reset,
+        )
+        output_path = output_dir / f"rank_change_{now_epoch_ms()}.png"
+        image.save(output_path, format="PNG", optimize=True)
+        self._cleanup_old_rank_change_cards(output_dir)
+        return output_path
+
+    def _rank_change_card_output_dir(self) -> Path:
+        data_dir = getattr(self, "_data_dir", None)
+        if data_dir is None:
+            return self._PLUGIN_ROOT / "_generated" / "rank_change_cards"
+        return Path(data_dir) / "rank_change_cards"
+
+    def _cleanup_old_rank_change_cards(self, output_dir: Path, keep: int = 16) -> None:
+        try:
+            files = sorted(
+                output_dir.glob("rank_change_*.png"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+            for file in files[keep:]:
+                file.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug(f"清理排位分数变化缓存图片失败: {exc}")
+
+    def _build_rank_change_card(
+        self,
+        player_data: ApexPlayerStats,
+        old_score: int,
+        new_score: int,
+        platform: str,
+        is_season_reset: bool,
+    ):
+        width, height = self._RANK_CHANGE_CARD_SIZE
+        canvas = Image.new("RGBA", (width, height), (7, 8, 11, 255))
+        draw = ImageDraw.Draw(canvas)
+        self._draw_rank_change_background(canvas)
+        self._draw_rank_change_outer_frame(draw, width, height)
+        self._draw_rank_change_header(draw, width)
+        self._draw_rank_change_time_bar(draw)
+
+        rank_display = (
+            f"{player_data.rank_name} {player_data.rank_div}"
+            if player_data.rank_div
+            else player_data.rank_name or "未知"
+        )
+        self._draw_rank_info_panel(
+            draw,
+            (54, 360, 388, 670),
+            "player",
+            "玩家",
+            player_data.name or "未知",
+        )
+        self._draw_rank_info_panel(
+            draw,
+            (402, 360, 720, 670),
+            "platform",
+            "平台",
+            self._format_platform(platform or player_data.platform),
+        )
+        self._draw_rank_badge_panel(
+            draw,
+            (734, 360, 1070, 670),
+            "段位",
+            rank_display,
+            player_data.rank_name,
+            player_data.rank_div,
+        )
+        self._draw_rank_score_change_panel(
+            draw,
+            old_score=old_score,
+            new_score=new_score,
+            is_season_reset=is_season_reset,
+        )
+        self._draw_rank_detail_panel(
+            draw,
+            (54, 1010, 370, 1340),
+            "globe",
+            "全球排名",
+            self._format_rank_percent(player_data.global_rank_percent),
+        )
+        self._draw_rank_detail_panel(
+            draw,
+            (376, 1010, 720, 1340),
+            "legend",
+            "当前英雄",
+            player_data.selected_legend or "未知",
+        )
+        status = player_data.current_state or ("在线" if player_data.is_online else "离线")
+        self._draw_rank_status_panel(draw, (724, 1010, 1070, 1340), status)
+        return canvas.convert("RGB")
+
+    def _draw_rank_change_background(self, canvas) -> None:
+        width, height = canvas.size
+        draw = ImageDraw.Draw(canvas)
+        for row in range(height):
+            ratio = row / max(1, height - 1)
+            shade = int(8 + 14 * ratio)
+            draw.line((0, row, width, row), fill=(shade, shade + 1, shade + 4, 255))
+        line_overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        line_draw = ImageDraw.Draw(line_overlay)
+        for x in range(-260, width, 220):
+            line_draw.line((x, 0, x + 470, height), fill=(255, 255, 255, 18), width=1)
+        canvas.alpha_composite(line_overlay)
+        glow = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        glow_draw = ImageDraw.Draw(glow)
+        glow_draw.rectangle((250, 218, 872, 224), fill=(230, 43, 45, 165))
+        glow_draw.rectangle((420, 1358, 760, 1365), fill=(230, 43, 45, 155))
+        glow = glow.filter(ImageFilter.GaussianBlur(radius=8))
+        canvas.alpha_composite(glow)
+
+    def _draw_rank_change_outer_frame(self, draw, width: int, height: int) -> None:
+        red = (228, 48, 52, 255)
+        silver = (112, 118, 126, 210)
+        outer = [
+            (36, 18),
+            (width - 52, 18),
+            (width - 18, 54),
+            (width - 18, height - 68),
+            (width - 60, height - 18),
+            (54, height - 18),
+            (18, height - 58),
+            (18, 56),
+        ]
+        inner = [
+            (50, 36),
+            (width - 68, 36),
+            (width - 36, 68),
+            (width - 36, height - 82),
+            (width - 76, height - 36),
+            (68, height - 36),
+            (36, height - 72),
+            (36, 70),
+        ]
+        draw.line(outer + [outer[0]], fill=red, width=4)
+        draw.line(inner + [inner[0]], fill=silver, width=2)
+        for x in (70, 340, 764, 1014):
+            draw.line((x, 44, x + 80, 44), fill=(224, 45, 48, 170), width=5)
+        for y in (242, 688, 1000):
+            draw.line((58, y, width - 58, y), fill=(210, 48, 52, 110), width=2)
+
+    def _draw_rank_change_header(self, draw, width: int) -> None:
+        title_box = (54, 54, width - 54, 224)
+        self._draw_rank_panel_base(draw, title_box, fill=(12, 14, 19, 238), outline_alpha=150)
+        self._draw_chart_icon(draw, (94, 82, 220, 190))
+        title = "Apex 排位分数变化"
+        title_font = self._fit_font(draw, title, 78, 50, width - 310, bold=True)
+        self._draw_text_stroked(
+            draw,
+            (260, self._centered_text_y(draw, title, title_font, 68, 202)),
+            title,
+            title_font,
+            fill=(248, 248, 244, 255),
+            stroke_width=2,
+        )
+        draw.rectangle((508, 217, 620, 222), fill=(236, 48, 52, 220))
+
+    def _draw_rank_change_time_bar(self, draw) -> None:
+        box = (54, 244, 1070, 338)
+        self._draw_rank_panel_base(draw, box, fill=(14, 17, 23, 240), outline_alpha=120)
+        self._draw_clock_icon(draw, (92, 265), 28)
+        label_font = self._font(34, bold=True)
+        value = self._now_str()
+        value_font = self._fit_font(draw, value, 37, 26, 600, bold=True)
+        self._draw_text_stroked(
+            draw,
+            (176, self._centered_text_y(draw, "时间:", label_font, box[1], box[3])),
+            "时间:",
+            label_font,
+            fill=(226, 226, 220, 255),
+        )
+        self._draw_text_stroked(
+            draw,
+            (288, self._centered_text_y(draw, value, value_font, box[1], box[3])),
+            value,
+            value_font,
+            fill=(244, 244, 239, 255),
+        )
+
+    def _draw_rank_info_panel(
+        self,
+        draw,
+        box: tuple[int, int, int, int],
+        icon: str,
+        label: str,
+        value: str,
+        secondary_value: str = "",
+    ) -> None:
+        self._draw_rank_panel_base(draw, box, fill=(13, 16, 21, 240), outline_alpha=105)
+        center_x = (box[0] + box[2]) // 2
+        icon_box = (center_x - 58, box[1] + 48, center_x + 58, box[1] + 164)
+        self._draw_icon_octagon(draw, icon_box)
+        if icon == "player" and self._DEFAULT_USER_AVATAR_PATH.exists():
+            self._draw_image_asset(
+                draw,
+                self._DEFAULT_USER_AVATAR_PATH,
+                icon_box,
+                clip_octagon=True,
+            )
+        else:
+            self._draw_rank_icon(draw, icon, icon_box)
+        label_font = self._font(34, bold=True)
+        value_bottom = box[3] - 58 if secondary_value else box[3] - 26
+        value_font = self._fit_font(draw, value, 46, 30, box[2] - box[0] - 56, bold=True)
+        self._draw_centered_stroked_text(
+            draw, label, label_font, box[0], box[2], box[1] + 178, box[1] + 224, (190, 192, 196, 255)
+        )
+        self._draw_centered_stroked_text(
+            draw, value, value_font, box[0] + 18, box[2] - 18, box[1] + 232, value_bottom, (250, 250, 246, 255)
+        )
+        if secondary_value:
+            secondary_font = self._fit_font(draw, secondary_value, 27, 20, box[2] - box[0] - 56, bold=True)
+            self._draw_centered_stroked_text(
+                draw,
+                secondary_value,
+                secondary_font,
+                box[0] + 22,
+                box[2] - 22,
+                box[3] - 58,
+                box[3] - 22,
+                (207, 211, 218, 255),
+            )
+
+    def _draw_rank_badge_panel(
+        self,
+        draw,
+        box: tuple[int, int, int, int],
+        label: str,
+        value: str,
+        rank_name: str,
+        rank_div: int,
+        secondary_value: str = "",
+    ) -> None:
+        self._draw_rank_panel_base(draw, box, fill=(13, 16, 21, 240), outline_alpha=105)
+        center_x = (box[0] + box[2]) // 2
+        rank_icon = self._resolve_rank_icon_path(rank_name)
+        if rank_icon.exists():
+            self._draw_image_asset(
+                draw,
+                rank_icon,
+                (center_x - 92, box[1] + 24, center_x + 92, box[1] + 178),
+            )
+            if rank_div and rank_icon.stem not in {"master", "predator"}:
+                badge_font = self._font(42, bold=True)
+                self._draw_centered_stroked_text(
+                    draw,
+                    str(rank_div),
+                    badge_font,
+                    center_x - 36,
+                    center_x + 36,
+                    box[1] + 84,
+                    box[1] + 142,
+                    (255, 255, 255, 255),
+                    stroke_width=2,
+                )
+        else:
+            self._draw_rank_diamond(draw, (center_x, box[1] + 110), rank_div)
+        label_font = self._font(34, bold=True)
+        label_top = box[1] + 176 if secondary_value else box[1] + 178
+        label_bottom = box[1] + 216 if secondary_value else box[1] + 224
+        value_top = box[1] + 214 if secondary_value else box[1] + 232
+        value_bottom = box[1] + 268 if secondary_value else box[3] - 26
+        value_size = 42 if secondary_value else 47
+        value_font = self._fit_font(draw, value, value_size, 30, box[2] - box[0] - 50, bold=True)
+        self._draw_centered_stroked_text(
+            draw, label, label_font, box[0], box[2], label_top, label_bottom, (190, 192, 196, 255)
+        )
+        self._draw_centered_stroked_text(
+            draw, value, value_font, box[0], box[2], value_top, value_bottom, (250, 250, 246, 255)
+        )
+        if secondary_value:
+            secondary_font = self._fit_font(draw, secondary_value, 27, 20, box[2] - box[0] - 60, bold=True)
+            self._draw_centered_stroked_text(
+                draw,
+                secondary_value,
+                secondary_font,
+                box[0] + 30,
+                box[2] - 30,
+                box[1] + 266,
+                box[3] - 18,
+                (214, 218, 224, 255),
+            )
+
+    def _draw_rank_score_change_panel(
+        self,
+        draw,
+        old_score: int,
+        new_score: int,
+        is_season_reset: bool,
+    ) -> None:
+        box = (52, 690, 1070, 992)
+        self._draw_rank_panel_base(draw, box, fill=(13, 15, 19, 244), outline_alpha=130)
+        draw.line((424, 716, 365, 966), fill=(154, 40, 44, 86), width=2)
+        draw.line((698, 716, 758, 966), fill=(154, 40, 44, 86), width=2)
+
+        diff = new_score - old_score
+        color = (88, 210, 126, 255) if diff > 0 else (238, 62, 66, 255)
+        direction = "上升" if diff > 0 else "下降"
+        sign_text = f"+{diff}" if diff > 0 else str(diff)
+        if is_season_reset:
+            direction = "赛季重置"
+        old_text = self._format_rank_score_number(old_score)
+        new_text = self._format_rank_score_number(new_score)
+        old_font = self._fit_font(draw, old_text, 94, 62, 320, bold=True)
+        new_font = self._fit_font(draw, new_text, 94, 62, 320, bold=True)
+        label_font = self._font(34, bold=True)
+        delta_font = self._fit_font(draw, sign_text, 76, 46, 220, bold=True)
+        desc = f"{direction} {abs(diff)} 分" if not is_season_reset else f"下降 {abs(diff)} 分"
+        desc_font = self._fit_font(draw, desc, 38, 26, 248, bold=True)
+
+        self._draw_centered_stroked_text(
+            draw, "原分数", label_font, 74, 404, 724, 780, (198, 202, 207, 255)
+        )
+        self._draw_centered_stroked_text(
+            draw, old_text, old_font, 74, 404, 794, 906, (248, 248, 244, 255), stroke_width=2
+        )
+        self._draw_centered_stroked_text(
+            draw, "当前分数", label_font, 718, 1048, 724, 780, (198, 202, 207, 255)
+        )
+        self._draw_centered_stroked_text(
+            draw, new_text, new_font, 718, 1048, 794, 906, (248, 248, 244, 255), stroke_width=2
+        )
+        self._draw_delta_arrows(draw, (561, 743), diff)
+        self._draw_centered_stroked_text(
+            draw, sign_text, delta_font, 448, 674, 790, 870, color, stroke_width=2
+        )
+        self._draw_centered_stroked_text(
+            draw, desc, desc_font, 430, 692, 882, 944, color, stroke_width=2
+        )
+        draw.rectangle((118, 944, 382, 950), fill=(221, 48, 52, 185))
+        draw.rectangle((740, 944, 1002, 950), fill=(221, 48, 52, 185))
+
+    def _draw_rank_detail_panel(
+        self,
+        draw,
+        box: tuple[int, int, int, int],
+        icon: str,
+        label: str,
+        value: str,
+        subtitle: str = "",
+    ) -> None:
+        self._draw_rank_panel_base(draw, box, fill=(13, 16, 21, 240), outline_alpha=100)
+        center_x = (box[0] + box[2]) // 2
+        icon_box = (center_x - 58, box[1] + 48, center_x + 58, box[1] + 164)
+        self._draw_icon_octagon(draw, icon_box)
+        legend_icon = self._resolve_legend_icon_path(value) if icon == "legend" else Path("")
+        if icon == "legend" and legend_icon.exists():
+            self._draw_image_asset(draw, legend_icon, icon_box, clip_octagon=True)
+        else:
+            self._draw_rank_icon(draw, icon, icon_box)
+        label_font = self._font(32, bold=True)
+        value_font = self._fit_font(draw, value, 48, 30, box[2] - box[0] - 56, bold=True)
+        label_top = box[1] + 174 if subtitle else box[1] + 178
+        label_bottom = box[1] + 216 if subtitle else box[1] + 226
+        value_top = box[1] + 216 if subtitle else box[1] + 238
+        value_bottom = box[1] + 272 if subtitle else box[3] - 32
+        self._draw_centered_stroked_text(
+            draw, label, label_font, box[0], box[2], label_top, label_bottom, (190, 192, 196, 255)
+        )
+        self._draw_centered_stroked_text(
+            draw, value, value_font, box[0] + 22, box[2] - 22, value_top, value_bottom, (250, 250, 246, 255)
+        )
+        if subtitle:
+            subtitle_font = self._fit_font(draw, subtitle, 26, 18, box[2] - box[0] - 56, bold=True)
+            self._draw_centered_stroked_text(
+                draw,
+                subtitle,
+                subtitle_font,
+                box[0] + 22,
+                box[2] - 22,
+                box[1] + 270,
+                box[3] - 22,
+                (207, 211, 218, 255),
+            )
+
+    def _draw_rank_status_panel(
+        self, draw, box: tuple[int, int, int, int], status: str
+    ) -> None:
+        status_badge = self._resolve_status_badge_path(status)
+        if status_badge.exists():
+            self._draw_image_asset(draw, status_badge, box)
+            return
+
+        self._draw_rank_panel_base(draw, box, fill=(13, 16, 21, 240), outline_alpha=100)
+        center_x = (box[0] + box[2]) // 2
+        icon_box = (center_x - 58, box[1] + 48, center_x + 58, box[1] + 164)
+        self._draw_icon_octagon(draw, icon_box)
+        self._draw_rank_icon(draw, "target", icon_box)
+        label_font = self._font(32, bold=True)
+        status_font = self._fit_font(draw, status or "未知", 42, 28, 206, bold=True)
+        self._draw_centered_stroked_text(
+            draw, "当前状态", label_font, box[0], box[2], box[1] + 178, box[1] + 226, (190, 192, 196, 255)
+        )
+        button = (box[0] + 58, box[1] + 238, box[2] - 58, box[1] + 320)
+        draw.rounded_rectangle(button, radius=8, fill=(186, 42, 42, 245), outline=(255, 98, 84, 230), width=2)
+        self._draw_centered_stroked_text(
+            draw, status or "未知", status_font, button[0], button[2], button[1], button[3], (255, 247, 235, 255)
+        )
+
+    def _draw_rank_panel_base(
+        self,
+        draw,
+        box: tuple[int, int, int, int],
+        fill: tuple[int, int, int, int],
+        outline_alpha: int,
+    ) -> None:
+        draw.rounded_rectangle(box, radius=8, fill=fill, outline=(92, 98, 108, 150), width=2)
+        inset = (box[0] + 8, box[1] + 8, box[2] - 8, box[3] - 8)
+        draw.rounded_rectangle(inset, radius=7, outline=(224, 48, 52, outline_alpha), width=2)
+        draw.line((box[0] + 24, box[1] + 28, box[0] + 118, box[1] + 28), fill=(220, 48, 52, 120), width=2)
+        draw.line((box[2] - 118, box[3] - 28, box[2] - 24, box[3] - 28), fill=(220, 48, 52, 120), width=2)
+
+    def _draw_centered_stroked_text(
+        self,
+        draw,
+        text: str,
+        font,
+        left: int,
+        right: int,
+        top: int,
+        bottom: int,
+        fill: tuple[int, int, int, int],
+        stroke_width: int = 1,
+    ) -> None:
+        text = str(text or "")
+        x = self._centered_text_x(draw, text, font, left, right)
+        y = self._centered_text_y(draw, text, font, top, bottom)
+        self._draw_text_stroked(draw, (x, y), text, font, fill=fill, stroke_width=stroke_width)
+
+    @staticmethod
+    def _draw_text_stroked(
+        draw,
+        xy,
+        text: str,
+        font,
+        fill: tuple[int, int, int, int],
+        stroke_width: int = 1,
+    ) -> None:
+        draw.text(
+            xy,
+            text,
+            font=font,
+            fill=fill,
+            stroke_width=stroke_width,
+            stroke_fill=(0, 0, 0, 205),
+        )
+
+    def _draw_icon_octagon(self, draw, box: tuple[int, int, int, int]) -> None:
+        left, top, right, bottom = box
+        cut = 24
+        points = [
+            (left + cut, top),
+            (right - cut, top),
+            (right, top + cut),
+            (right, bottom - cut),
+            (right - cut, bottom),
+            (left + cut, bottom),
+            (left, bottom - cut),
+            (left, top + cut),
+        ]
+        draw.polygon(points, fill=(23, 24, 29, 230), outline=(218, 49, 52, 190))
+
+    def _draw_image_asset(
+        self,
+        draw,
+        path: Path,
+        box: tuple[int, int, int, int],
+        clip_octagon: bool = False,
+    ) -> None:
+        try:
+            with Image.open(path) as raw:
+                image = raw.convert("RGBA")
+        except Exception as exc:
+            logger.debug(f"读取图片资源失败 {path}: {exc}")
+            return
+
+        width = max(1, box[2] - box[0])
+        height = max(1, box[3] - box[1])
+        resampling = getattr(Image, "Resampling", Image).LANCZOS
+        image = ImageOps.contain(image, (width, height), method=resampling)
+        canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        canvas.alpha_composite(image, ((width - image.width) // 2, (height - image.height) // 2))
+        if clip_octagon:
+            mask = Image.new("L", (width, height), 0)
+            mask_draw = ImageDraw.Draw(mask)
+            cut = max(12, min(width, height) // 5)
+            mask_draw.polygon(
+                [
+                    (cut, 0),
+                    (width - cut, 0),
+                    (width, cut),
+                    (width, height - cut),
+                    (width - cut, height),
+                    (cut, height),
+                    (0, height - cut),
+                    (0, cut),
+                ],
+                fill=255,
+            )
+            clipped = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            clipped.paste(canvas, (0, 0), mask)
+            canvas = clipped
+        target = getattr(draw, "_image", None)
+        if target is not None:
+            try:
+                if getattr(target, "mode", "") == "RGBA":
+                    target.alpha_composite(canvas, (box[0], box[1]))
+                else:
+                    target.paste(canvas.convert(target.mode), (box[0], box[1]), canvas.getchannel("A"))
+                return
+            except Exception as exc:
+                logger.debug(f"粘贴图片资源失败 {path}: {exc}")
+
+        try:
+            draw.bitmap((box[0], box[1]), canvas)
+        except Exception as exc:
+            logger.debug(f"绘制图片资源失败 {path}: {exc}")
+
+    def _resolve_rank_icon_path(self, rank_name: str) -> Path:
+        normalized = self._normalize_asset_token(rank_name)
+        aliases = {
+            "rookie": "rookie",
+            "unranked": "rookie",
+            "novice": "rookie",
+            "菜鸟": "rookie",
+            "青铜": "bronze",
+            "bronze": "bronze",
+            "白银": "silver",
+            "silver": "silver",
+            "黄金": "gold",
+            "gold": "gold",
+            "白金": "platinum",
+            "platinum": "platinum",
+            "铂金": "platinum",
+            "钻石": "diamond",
+            "diamond": "diamond",
+            "大师": "master",
+            "master": "master",
+            "猎杀": "predator",
+            "apex猎杀者": "predator",
+            "apexpredator": "predator",
+            "predator": "predator",
+        }
+        key = aliases.get(normalized)
+        if key is None and "猎杀" in normalized:
+            key = "predator"
+        if key is None:
+            key = normalized
+        return self._RANK_ICON_DIR / f"{key}.png"
+
+    def _resolve_legend_icon_path(self, legend_name: str) -> Path:
+        normalized = self._normalize_asset_token(legend_name)
+        aliases = {
+            "艾许": "ash",
+            "ash": "ash",
+            "班加罗尔": "bangalore",
+            "bangalore": "bangalore",
+            "寻血猎犬": "bloodhound",
+            "bloodhound": "bloodhound",
+            "卡特莉丝": "catalyst",
+            "催化姬": "catalyst",
+            "catalyst": "catalyst",
+            "侵蚀": "caustic",
+            "caustic": "caustic",
+            "密客": "crypto",
+            "crypto": "crypto",
+            "暴雷": "fuse",
+            "fuse": "fuse",
+            "直布罗陀": "gibraltar",
+            "gibraltar": "gibraltar",
+            "地平线": "horizon",
+            "horizon": "horizon",
+            "命脉": "lifeline",
+            "lifeline": "lifeline",
+            "罗芭": "loba",
+            "loba": "loba",
+            "疯玛吉": "mad_maggie",
+            "madmaggie": "mad_maggie",
+            "madmaggie": "mad_maggie",
+            "幻象": "mirage",
+            "mirage": "mirage",
+            "纽卡斯尔": "newcastle",
+            "newcastle": "newcastle",
+            "动力小子": "octane",
+            "octane": "octane",
+            "探路者": "pathfinder",
+            "pathfinder": "pathfinder",
+            "兰伯特": "rampart",
+            "rampart": "rampart",
+            "亡灵": "revenant",
+            "revenant": "revenant",
+            "希尔": "seer",
+            "seer": "seer",
+            "琉雀": "sparrow",
+            "麻雀": "sparrow",
+            "sparrow": "sparrow",
+            "瓦尔基里": "valkyrie",
+            "valkyrie": "valkyrie",
+            "万蒂奇": "vantage",
+            "vantage": "vantage",
+            "沃特森": "wattson",
+            "wattson": "wattson",
+            "恶灵": "wraith",
+            "wraith": "wraith",
+            "导管": "conduit",
+            "导线管": "conduit",
+            "conduit": "conduit",
+            "弹道": "ballistic",
+            "ballistic": "ballistic",
+            "变幻": "alter",
+            "alter": "alter",
+            "艾克赛尔": "axle",
+            "axle": "axle",
+        }
+        key = aliases.get(normalized, normalized)
+        return self._LEGEND_ICON_DIR / f"{key}.png"
+
+    def _resolve_status_badge_path(self, status: str) -> Path:
+        normalized = self._normalize_asset_token(status)
+        aliases = {
+            "比赛中": "in_match",
+            "正在比赛": "in_match",
+            "游戏中": "in_match",
+            "inmatch": "in_match",
+            "match": "in_match",
+            "在大厅": "in_lobby",
+            "大厅中": "in_lobby",
+            "等待中": "in_lobby",
+            "inlobby": "in_lobby",
+            "lobby": "in_lobby",
+            "离线": "offline",
+            "offline": "offline",
+        }
+        key = aliases.get(normalized)
+        if key is None and ("比赛" in normalized or "match" in normalized):
+            key = "in_match"
+        if key is None and ("大厅" in normalized or "lobby" in normalized):
+            key = "in_lobby"
+        if key is None and ("离线" in normalized or "offline" in normalized):
+            key = "offline"
+        if key is None:
+            key = normalized
+        return self._STATUS_BADGE_DIR / f"{key}.png"
+
+    @staticmethod
+    def _normalize_asset_token(value: str) -> str:
+        text = str(value or "").strip()
+        text = text.replace("·", "").replace("'", "").replace("’", "")
+        text = text.replace("-", "").replace("_", "").replace(" ", "")
+        return text.lower()
+
+    def _draw_rank_icon(self, draw, icon: str, box: tuple[int, int, int, int]) -> None:
+        left, top, right, bottom = box
+        cx = (left + right) // 2
+        cy = (top + bottom) // 2
+        white = (244, 241, 235, 255)
+        if icon == "player":
+            draw.ellipse((cx - 20, cy - 38, cx + 20, cy + 2), fill=white)
+            draw.pieslice((cx - 52, cy - 4, cx + 52, cy + 76), 180, 360, fill=white)
+            draw.rectangle((cx - 52, cy + 36, cx + 52, cy + 76), fill=white)
+        elif icon == "platform":
+            self._draw_monitor_icon(draw, (cx, cy), 76, white)
+        elif icon == "globe":
+            draw.ellipse((cx - 42, cy - 42, cx + 42, cy + 42), outline=white, width=5)
+            draw.arc((cx - 22, cy - 42, cx + 22, cy + 42), 90, 270, fill=white, width=4)
+            draw.arc((cx - 22, cy - 42, cx + 22, cy + 42), -90, 90, fill=white, width=4)
+            draw.line((cx - 42, cy, cx + 42, cy), fill=white, width=4)
+            draw.line((cx, cy - 42, cx, cy + 42), fill=white, width=4)
+        elif icon == "legend":
+            draw.ellipse((cx - 30, cy - 16, cx + 30, cy + 40), outline=white, width=5)
+            spikes = [
+                (cx - 38, cy - 8), (cx - 24, cy - 44), (cx - 12, cy - 16),
+                (cx, cy - 54), (cx + 12, cy - 16), (cx + 28, cy - 44),
+                (cx + 38, cy - 8),
+            ]
+            draw.line(spikes, fill=white, width=8, joint="curve")
+            draw.ellipse((cx - 26, cy + 2, cx - 2, cy + 24), outline=white, width=5)
+            draw.ellipse((cx + 2, cy + 2, cx + 26, cy + 24), outline=white, width=5)
+            draw.line((cx - 2, cy + 13, cx + 2, cy + 13), fill=white, width=4)
+        elif icon == "target":
+            draw.ellipse((cx - 38, cy - 38, cx + 38, cy + 38), outline=white, width=5)
+            draw.ellipse((cx - 15, cy - 15, cx + 15, cy + 15), outline=white, width=4)
+            draw.line((cx - 56, cy, cx + 56, cy), fill=white, width=4)
+            draw.line((cx, cy - 56, cx, cy + 56), fill=white, width=4)
+        elif icon == "crown":
+            crown = [
+                (cx - 48, cy + 34),
+                (cx - 38, cy - 26),
+                (cx - 14, cy + 4),
+                (cx, cy - 42),
+                (cx + 14, cy + 4),
+                (cx + 38, cy - 26),
+                (cx + 48, cy + 34),
+            ]
+            draw.line(crown, fill=white, width=8, joint="curve")
+            draw.rounded_rectangle((cx - 44, cy + 28, cx + 44, cy + 50), radius=4, fill=white)
+
+    def _draw_monitor_icon(self, draw, center: tuple[int, int], size: int, fill) -> None:
+        cx, cy = center
+        w = size
+        h = int(size * 0.58)
+        draw.rounded_rectangle((cx - w // 2, cy - h // 2, cx + w // 2, cy + h // 2), radius=6, outline=fill, width=7)
+        draw.line((cx, cy + h // 2, cx, cy + h // 2 + 22), fill=fill, width=7)
+        draw.line((cx - 34, cy + h // 2 + 24, cx + 34, cy + h // 2 + 24), fill=fill, width=7)
+
+    def _draw_chart_icon(self, draw, box: tuple[int, int, int, int]) -> None:
+        left, top, right, bottom = box
+        white = (230, 232, 229, 255)
+        red = (238, 62, 66, 255)
+        draw.rectangle((left, top, right, bottom), outline=white, width=3)
+        for index in range(1, 4):
+            x = left + (right - left) * index // 4
+            y = top + (bottom - top) * index // 4
+            draw.line((x, top, x, bottom), fill=(white[0], white[1], white[2], 70), width=2)
+            draw.line((left, y, right, y), fill=(white[0], white[1], white[2], 70), width=2)
+        points = [
+            (left + 18, bottom - 18),
+            (left + 46, bottom - 52),
+            (left + 72, bottom - 28),
+            (left + 100, top + 42),
+            (right - 10, top + 16),
+        ]
+        draw.line(points, fill=red, width=9, joint="curve")
+        draw.polygon(
+            [(right - 10, top + 16), (right - 12, top + 52), (right - 42, top + 24)],
+            fill=red,
+        )
+
+    def _draw_clock_icon(self, draw, center: tuple[int, int], radius: int) -> None:
+        cx, cy = center
+        red = (238, 62, 66, 255)
+        draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius), outline=red, width=5)
+        draw.line((cx, cy, cx, cy - 18), fill=red, width=5)
+        draw.line((cx, cy, cx + 18, cy + 10), fill=red, width=5)
+
+    def _draw_rank_diamond(self, draw, center: tuple[int, int], rank_div: int) -> None:
+        cx, cy = center
+        outer = [(cx, cy - 74), (cx + 82, cy), (cx, cy + 74), (cx - 82, cy)]
+        inner = [(cx, cy - 52), (cx + 58, cy), (cx, cy + 52), (cx - 58, cy)]
+        draw.polygon(outer, fill=(45, 47, 122, 235), outline=(184, 188, 255, 255))
+        draw.line(outer + [outer[0]], fill=(158, 164, 255, 255), width=5)
+        draw.polygon(inner, fill=(35, 31, 84, 245), outline=(230, 232, 255, 205))
+        for offset in (94, -94):
+            draw.line((cx + offset, cy, cx + offset // 2, cy - 42), fill=(156, 188, 255, 165), width=5)
+            draw.line((cx + offset, cy, cx + offset // 2, cy + 42), fill=(156, 188, 255, 165), width=5)
+        number = str(rank_div or "")
+        if number:
+            font = self._font(58, bold=True)
+            self._draw_centered_stroked_text(
+                draw, number, font, cx - 48, cx + 48, cy - 42, cy + 48, (255, 255, 255, 255), stroke_width=2
+            )
+
+    def _draw_delta_arrows(self, draw, center: tuple[int, int], diff: int) -> None:
+        cx, cy = center
+        color = (88, 210, 126, 255) if diff > 0 else (238, 62, 66, 255)
+        direction = -1 if diff > 0 else 1
+        for offset in (0, 38):
+            y = cy + offset * direction
+            if diff > 0:
+                points = [(cx, y - 30), (cx - 42, y + 16), (cx - 22, y + 16), (cx, y - 7), (cx + 22, y + 16), (cx + 42, y + 16)]
+            else:
+                points = [(cx, y + 30), (cx - 42, y - 16), (cx - 22, y - 16), (cx, y + 7), (cx + 22, y - 16), (cx + 42, y - 16)]
+            draw.line(points, fill=color, width=10, joint="curve")
+
+    def _format_rank_percent(self, value: str) -> str:
+        text = str(value or "").strip()
+        if not text or text == "未知":
+            return "未知"
+        if text.endswith("%"):
+            return text
+        return f"{text}%"
+
+    @staticmethod
+    def _format_rank_score_number(value: int) -> str:
+        try:
+            return str(int(value))
+        except Exception:
+            return str(value)
+
+    def _render_season_info_image(self, season_info: SeasonInfo) -> Path:
+        if Image is None:
+            raise RuntimeError("缺少 Pillow，无法生成赛季图片")
+
+        output_dir = self._season_card_output_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        cache_key = self._season_info_image_cache_key(output_dir, season_info)
+        cached_path = self._get_cached_season_info_image(cache_key)
+        if cached_path is not None:
+            return cached_path
+
+        image = self._build_season_info_card(season_info)
+        output_path = output_dir / f"season_info_{now_epoch_ms()}.png"
+        image.save(output_path, format="PNG", optimize=True)
+        self._set_cached_season_info_image(cache_key, output_path)
+        self._cleanup_old_season_cards(output_dir)
+        return output_path
+
+    def _get_cached_season_info_image(self, cache_key: tuple) -> Path | None:
+        cache = getattr(self, "_season_info_image_cache", None)
+        if not isinstance(cache, dict):
+            return None
+        cached = cache.get(cache_key)
+        if not cached:
+            return None
+        saved_at, image_path = cached
+        if time.monotonic() - saved_at > self._SEASON_IMAGE_CACHE_TTL_SECONDS:
+            cache.pop(cache_key, None)
+            return None
+        image_path = Path(image_path)
+        if not image_path.exists():
+            cache.pop(cache_key, None)
+            return None
+        return image_path
+
+    def _set_cached_season_info_image(self, cache_key: tuple, image_path: Path) -> None:
+        cache = getattr(self, "_season_info_image_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._season_info_image_cache = cache
+        cache[cache_key] = (time.monotonic(), Path(image_path))
+
+    def _season_info_image_cache_key(
+        self, output_dir: Path, season_info: SeasonInfo
+    ) -> tuple:
+        return (
+            str(output_dir.resolve()),
+            season_info.season_number,
+            season_info.season_name,
+            season_info.start_iso,
+            season_info.end_iso,
+        )
+
+    def _season_card_output_dir(self) -> Path:
+        data_dir = getattr(self, "_data_dir", None)
+        if data_dir is None:
+            return self._PLUGIN_ROOT / "_generated" / "season_cards"
+        return Path(data_dir) / "season_cards"
+
+    def _cleanup_old_season_cards(self, output_dir: Path, keep: int = 8) -> None:
+        try:
+            files = sorted(
+                output_dir.glob("season_info_*.png"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+            for file in files[keep:]:
+                file.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug(f"清理赛季缓存图片失败: {exc}")
+
+    def _build_season_info_card(self, season_info: SeasonInfo):
+        width, height = self._SEASON_CARD_SIZE
+        canvas = Image.new("RGBA", (width, height), (10, 11, 14, 255))
+        draw = ImageDraw.Draw(canvas)
+
+        # 使用 Apex 红黑配色，保证 QQ 缩略图里也能快速读到赛季和结束时间。
+        for row in range(height):
+            ratio = row / max(1, height - 1)
+            red = int(12 + 34 * ratio)
+            green = int(13 + 7 * ratio)
+            blue = int(17 + 5 * ratio)
+            draw.line((0, row, width, row), fill=(red, green, blue, 255))
+        apex_red = (216, 35, 42, 255)
+        apex_amber = (240, 174, 72, 255)
+        draw.polygon((560, 0, width, 0, width, height, 690, height), fill=(94, 15, 20, 215))
+        draw.polygon((716, 0, width, 0, width, 136, 794, 94), fill=(236, 50, 42, 205))
+        draw.polygon((0, 0, 286, 0, 196, height, 0, height), fill=(18, 21, 27, 210))
+        draw.rectangle((0, 0, width, 9), fill=apex_red)
+        draw.rectangle((0, height - 56, width, height), fill=(6, 7, 10, 175))
+        for x in range(120, width, 168):
+            draw.line((x, 18, x - 76, height - 16), fill=(255, 255, 255, 12), width=2)
+
+        season_label = self._season_card_label(season_info)
+        end_time = self._to_beijing_time(season_info.end_iso) or season_info.end_date or "未知"
+        start_time = self._to_beijing_time(season_info.start_iso) or season_info.start_date or "未知"
+        remaining = self._format_remaining(season_info.end_iso) or "未知"
+        progress = self._season_progress_fraction(season_info)
+
+        logo = self._apex_logo_badge(92)
+        canvas.alpha_composite(logo, (34, 28))
+
+        header_font = self._font(24, bold=True)
+        title_font = self._fit_font(draw, season_label, 62, 38, width - 330, bold=True)
+        label_font = self._font(25, bold=True)
+        value_font = self._fit_font(draw, end_time, 46, 30, width - 405, bold=True)
+        small_font = self._font(22)
+        source_font = self._font(18)
+
+        draw.text((146, 31), "APEX LEGENDS", font=source_font, fill=(216, 35, 42, 255))
+        self._draw_text_with_shadow(
+            draw,
+            (146, 54),
+            "当前赛季",
+            header_font,
+            fill=(236, 239, 244, 255),
+        )
+        self._draw_text_with_shadow(
+            draw,
+            (146, 88),
+            season_label,
+            title_font,
+            fill=(255, 255, 255, 255),
+        )
+
+        status = season_info.status_text or "未知"
+        status_font = self._fit_font(draw, status, 24, 18, 120, bold=True)
+        draw.rounded_rectangle((728, 34, 850, 72), radius=8, fill=(232, 43, 45, 245))
+        status_box = draw.textbbox((0, 0), status, font=status_font)
+        draw.text(
+            (789 - (status_box[2] - status_box[0]) / 2, 43),
+            status,
+            font=status_font,
+            fill=(255, 255, 255, 255),
+        )
+
+        panel = (34, 164, 866, 250)
+        label_bounds = (64, 164, 292, 250)
+        time_bounds = (304, 164, 846, 250)
+        draw.rounded_rectangle(panel, radius=8, fill=(15, 18, 24, 238))
+        draw.rounded_rectangle(panel, radius=8, outline=(232, 43, 45, 160), width=2)
+        draw.rounded_rectangle((34, 164, 48, 250), radius=7, fill=apex_red)
+        end_label = self._season_end_label()
+        self._draw_text_with_shadow(
+            draw,
+            (
+                label_bounds[0],
+                self._centered_text_y(
+                    draw, end_label, label_font, label_bounds[1], label_bounds[3]
+                ),
+            ),
+            end_label,
+            label_font,
+            fill=(232, 215, 191, 255),
+        )
+        time_x = self._centered_text_x(
+            draw, end_time, value_font, time_bounds[0], time_bounds[2]
+        )
+        self._draw_text_with_shadow(
+            draw,
+            (
+                time_x,
+                self._centered_text_y(
+                    draw, end_time, value_font, time_bounds[1], time_bounds[3]
+                ),
+            ),
+            end_time,
+            value_font,
+            fill=(255, 246, 228, 255),
+        )
+
+        bar_x, bar_y, bar_w, bar_h = 58, 270, 520, 14
+        draw.rounded_rectangle(
+            (bar_x, bar_y, bar_x + bar_w, bar_y + bar_h),
+            radius=7,
+            fill=(50, 55, 64, 255),
+        )
+        self._draw_gradient_progress_bar(
+            canvas,
+            (bar_x, bar_y, bar_x + bar_w, bar_y + bar_h),
+            progress,
+            apex_red,
+            apex_amber,
+        )
+        draw.text(
+            (58, 288),
+            f"开始 {start_time}",
+            font=source_font,
+            fill=(191, 198, 209, 235),
+        )
+        draw.text(
+            (620, 267),
+            f"剩余 {remaining}",
+            font=small_font,
+            fill=(255, 235, 204, 255),
+        )
+        draw.text(
+            (620, 296),
+            f"来源 {season_info.source}",
+            font=source_font,
+            fill=(178, 190, 204, 230),
+        )
+
+        return canvas.convert("RGB")
+
+    @staticmethod
+    def _season_end_label() -> str:
+        return "赛季结束时间"
+
+    @staticmethod
+    def _centered_text_x(draw, text: str, font, left: int, right: int) -> float:
+        box = draw.textbbox((0, 0), text, font=font)
+        return left + ((right - left) - (box[2] - box[0])) / 2
+
+    @staticmethod
+    def _centered_text_y(draw, text: str, font, top: int, bottom: int) -> float:
+        box = draw.textbbox((0, 0), text, font=font)
+        return top + ((bottom - top) - (box[3] - box[1])) / 2 - box[1]
+
+    @staticmethod
+    def _draw_gradient_progress_bar(
+        canvas,
+        box: tuple[int, int, int, int],
+        progress: float,
+        start_color: tuple[int, int, int, int],
+        end_color: tuple[int, int, int, int],
+    ) -> None:
+        left, top, right, bottom = box
+        width = max(0, int((right - left) * min(1.0, max(0.0, progress))))
+        height = bottom - top
+        if width <= 0 or height <= 0:
+            return
+
+        gradient = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        pixels = gradient.load()
+        for x in range(width):
+            ratio = x / max(1, width - 1)
+            color = tuple(
+                int(start_color[index] + (end_color[index] - start_color[index]) * ratio)
+                for index in range(4)
+            )
+            for y in range(height):
+                pixels[x, y] = color
+
+        mask = Image.new("L", (width, height), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.rounded_rectangle((0, 0, width, height), radius=height // 2, fill=255)
+        clipped = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        clipped.paste(gradient, (0, 0), mask)
+        canvas.alpha_composite(clipped, (left, top))
+
+    def _apex_logo_badge(self, size: int):
+        badge = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(badge)
+        draw.ellipse((0, 0, size - 1, size - 1), fill=(7, 9, 13, 238))
+        draw.ellipse((4, 4, size - 5, size - 5), outline=(232, 43, 45, 255), width=3)
+
+        logo_path = self._PLUGIN_ROOT / "logo.png"
+        if logo_path.exists():
+            with Image.open(logo_path) as raw:
+                logo = raw.convert("RGBA")
+            logo = ImageOps.fit(
+                logo,
+                (size - 12, size - 12),
+                method=getattr(Image, "Resampling", Image).LANCZOS,
+                centering=(0.5, 0.5),
+            )
+            mask = Image.new("L", logo.size, 0)
+            mask_draw = ImageDraw.Draw(mask)
+            mask_draw.ellipse((0, 0, logo.size[0] - 1, logo.size[1] - 1), fill=255)
+            clipped_logo = Image.new("RGBA", logo.size, (0, 0, 0, 0))
+            clipped_logo.paste(logo, (0, 0), mask)
+            badge.alpha_composite(clipped_logo, (6, 6))
+        else:
+            font = self._font(54, bold=True)
+            draw.text((size * 0.28, size * 0.15), "A", font=font, fill=(232, 43, 45, 255))
+
+        return badge
+
+    def _season_card_label(self, season_info: SeasonInfo) -> str:
+        if season_info.season_number is not None and season_info.season_name:
+            return f"S{season_info.season_number} · {season_info.season_name}"
+        if season_info.season_number is not None:
+            return f"S{season_info.season_number}"
+        return season_info.season_name or "未知赛季"
+
+    @staticmethod
+    def _season_progress_fraction(season_info: SeasonInfo) -> float:
+        try:
+            start = season_info.start_iso
+            end = season_info.end_iso
+            if not start or not end:
+                return 0.0
+            start_dt = datetime.fromisoformat(
+                start.replace("Z", "+00:00") if start.endswith("Z") else start
+            )
+            end_dt = datetime.fromisoformat(
+                end.replace("Z", "+00:00") if end.endswith("Z") else end
+            )
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=timezone.utc)
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
+            total = (end_dt - start_dt).total_seconds()
+            if total <= 0:
+                return 0.0
+            elapsed = (datetime.now(timezone.utc) - start_dt.astimezone(timezone.utc)).total_seconds()
+            return min(1.0, max(0.0, elapsed / total))
+        except Exception:
+            return 0.0
+
+    def _format_map_rotation_text(
+        self, rotation_info: MapRotationInfo, mode: str = "ranked"
+    ) -> str:
+        if mode == "battle_royale":
+            rotation_mode = rotation_info.battle_royale
+            current_label = "当前三人赛地图"
+            title = "🗺️ Apex 三人赛地图轮换"
+            missing_text = "⚠️ 暂未获取到三人赛地图轮换数据，请稍后再试"
+        else:
+            rotation_mode = rotation_info.ranked
+            current_label = "当前排位地图"
+            title = "🗺️ Apex 排位地图轮换"
+            missing_text = "⚠️ 暂未获取到排位地图轮换数据，请稍后再试"
+
+        current = rotation_mode.current
+        next_entry = rotation_mode.next
+        if current is None:
+            return "\n".join(
+                [
+                    self._time_line(),
+                    missing_text,
+                ]
+            )
+
+        lines = [
+            f"📍 {current_label}：{self._format_map_name(current)}",
+            f"🕒 查询时间：{self._now_str()}",
+            title,
+            "——",
+            f"⏰ 本轮时间：{self._format_rotation_range(current)}",
+        ]
+        if current.remaining_timer:
+            lines.append(f"⏳ 剩余时间：{current.remaining_timer}")
+
+        if next_entry is not None:
+            lines.extend(
+                [
+                    "——",
+                    f"➡️ 下一张：{self._format_map_name(next_entry)}",
+                    f"⏰ 下轮时间：{self._format_rotation_range(next_entry)}",
+                ]
+            )
+
+        lines.append("ℹ️ 时间均为北京时间")
+        return "\n".join(lines)
+
+    def _render_map_rotation_image(
+        self, rotation_info: MapRotationInfo, mode: str = "ranked"
+    ) -> Path:
+        if Image is None:
+            raise RuntimeError("缺少 Pillow，无法生成地图轮换图片")
+
+        if mode == "battle_royale":
+            rotation_mode = rotation_info.battle_royale
+            current_label = "当前三人赛地图"
+            next_label = "下一张三人赛地图"
+        else:
+            rotation_mode = rotation_info.ranked
+            current_label = "当前排位地图"
+            next_label = "下一张排位地图"
+
+        current = rotation_mode.current
+        if current is None:
+            raise ValueError("缺少当前地图轮换数据")
+
+        output_dir = self._map_card_output_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        cache_key = self._map_rotation_image_cache_key(
+            mode=mode,
+            output_dir=output_dir,
+            current=current,
+            next_entry=rotation_mode.next,
+        )
+        cached_path = self._get_cached_map_rotation_image(cache_key)
+        if cached_path is not None:
+            return cached_path
+
+        image = self._build_map_rotation_card(
+            current=current,
+            next_entry=rotation_mode.next,
+            current_label=current_label,
+            next_label=next_label,
+        )
+        output_path = output_dir / f"map_rotation_{mode}_{now_epoch_ms()}.png"
+        image.save(output_path, format="PNG", optimize=True)
+        self._set_cached_map_rotation_image(cache_key, output_path)
+        self._cleanup_old_map_cards(output_dir)
+        return output_path
+
+    def _get_cached_map_rotation_image(self, cache_key: tuple) -> Path | None:
+        cache = getattr(self, "_map_rotation_image_cache", None)
+        if not isinstance(cache, dict):
+            return None
+        cached = cache.get(cache_key)
+        if not cached:
+            return None
+        saved_at, image_path = cached
+        if time.monotonic() - saved_at > self._MAP_IMAGE_CACHE_TTL_SECONDS:
+            cache.pop(cache_key, None)
+            return None
+        image_path = Path(image_path)
+        if not image_path.exists():
+            cache.pop(cache_key, None)
+            return None
+        return image_path
+
+    def _set_cached_map_rotation_image(self, cache_key: tuple, image_path: Path) -> None:
+        cache = getattr(self, "_map_rotation_image_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._map_rotation_image_cache = cache
+        cache[cache_key] = (time.monotonic(), Path(image_path))
+
+    def _map_rotation_image_cache_key(
+        self,
+        mode: str,
+        output_dir: Path,
+        current: MapRotationEntry,
+        next_entry: MapRotationEntry | None,
+    ) -> tuple:
+        next_key = None
+        if next_entry is not None:
+            next_key = (
+                next_entry.map_name,
+                next_entry.start_timestamp,
+                next_entry.end_timestamp,
+            )
+        return (
+            mode,
+            str(output_dir.resolve()),
+            current.map_name,
+            current.start_timestamp,
+            current.end_timestamp,
+            next_key,
+        )
+
+    def _map_card_output_dir(self) -> Path:
+        data_dir = getattr(self, "_data_dir", None)
+        if data_dir is None:
+            return self._PLUGIN_ROOT / "_generated" / "map_cards"
+        return Path(data_dir) / "map_cards"
+
+    def _cleanup_old_map_cards(self, output_dir: Path, keep: int = 12) -> None:
+        try:
+            files = sorted(
+                output_dir.glob("map_rotation_*.png"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+            for file in files[keep:]:
+                file.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug(f"清理地图轮换缓存图片失败: {exc}")
+
+    def _build_map_rotation_card(
+        self,
+        current: MapRotationEntry,
+        next_entry: MapRotationEntry | None,
+        current_label: str,
+        next_label: str,
+    ):
+        width, height = self._MAP_CARD_SIZE
+        current_height = self._MAP_CURRENT_HEIGHT
+        next_height = height - current_height
+
+        canvas = Image.new("RGBA", (width, height), (8, 10, 14, 255))
+        current_bg = self._map_background(current, (width, current_height), focus_y=0.42)
+        canvas.alpha_composite(current_bg, (0, 0))
+
+        draw = ImageDraw.Draw(canvas)
+        self._overlay_rect(canvas, (0, 0, width, current_height), (0, 0, 0, 80))
+        self._draw_horizontal_gradient(canvas, 0, current_height, 190, left=True)
+
+        self._draw_map_card_current_section(
+            draw=draw,
+            current=current,
+            label=current_label,
+            width=width,
+            height=current_height,
+        )
+
+        if next_entry is not None:
+            next_bg = self._map_background(next_entry, (width, next_height), focus_y=0.48)
+            canvas.alpha_composite(next_bg, (0, current_height))
+            self._overlay_rect(
+                canvas, (0, current_height, width, height), (0, 0, 0, 94)
+            )
+            self._draw_horizontal_gradient(canvas, current_height, next_height, 165, left=True)
+            self._draw_map_card_next_section(
+                draw=draw,
+                next_entry=next_entry,
+                label=next_label,
+                y=current_height,
+                width=width,
+                height=next_height,
+            )
+        else:
+            draw.rectangle((0, current_height, width, height), fill=(9, 12, 18, 255))
+            font = self._font(30, bold=True)
+            self._draw_text_with_shadow(
+                draw,
+                (34, current_height + 34),
+                "暂无下一张地图",
+                font,
+                fill=(238, 242, 246, 255),
+            )
+
+        draw.line((0, current_height, width, current_height), fill=(255, 255, 255, 36), width=2)
+        return canvas.convert("RGB")
+
+    @staticmethod
+    def _overlay_rect(canvas, box: tuple[int, int, int, int], fill: tuple[int, int, int, int]) -> None:
+        overlay = Image.new("RGBA", (box[2] - box[0], box[3] - box[1]), fill)
+        canvas.alpha_composite(overlay, (box[0], box[1]))
+
+    def _draw_map_card_current_section(
+        self,
+        draw,
+        current: MapRotationEntry,
+        label: str,
+        width: int,
+        height: int,
+    ) -> None:
+        title = self._map_card_name(current)
+        time_range = self._format_rotation_range_short(current)
+        remaining = self._format_remaining_for_card(current)
+
+        label_font = self._font(27, bold=True)
+        title_font = self._fit_font(draw, title, 61, 36, max_width=width - 330, bold=True)
+        time_font = self._font(28)
+
+        self._draw_text_with_shadow(
+            draw,
+            (34, 24),
+            label,
+            label_font,
+            fill=(231, 236, 243, 255),
+        )
+        self._draw_text_with_shadow(
+            draw,
+            (34, 62),
+            title,
+            title_font,
+            fill=(255, 255, 255, 255),
+        )
+        self._draw_text_with_shadow(
+            draw,
+            (36, 133),
+            f"本轮时间：{time_range}",
+            time_font,
+            fill=(238, 242, 246, 255),
+        )
+        self._draw_remaining_ring(draw, (width - 150, 36), remaining, current)
+
+    def _draw_map_card_next_section(
+        self,
+        draw,
+        next_entry: MapRotationEntry,
+        label: str,
+        y: int,
+        width: int,
+        height: int,
+    ) -> None:
+        name = self._map_card_name(next_entry)
+        time_range = self._format_rotation_range_short(next_entry)
+        time_text = f"下轮时间：{time_range}"
+        label_font = self._font(24, bold=True)
+        name_font = self._fit_font(draw, name, 42, 30, max_width=width - 460, bold=True)
+        time_font = self._fit_font(draw, time_text, 25, 18, max_width=width - 420)
+        time_box = draw.textbbox((0, 0), time_text, font=time_font)
+        time_width = time_box[2] - time_box[0]
+        time_x = max(34, width - 34 - time_width)
+
+        self._draw_text_with_shadow(
+            draw,
+            (34, y + 16),
+            label,
+            label_font,
+            fill=(219, 226, 235, 255),
+        )
+        self._draw_text_with_shadow(
+            draw,
+            (34, y + 45),
+            name,
+            name_font,
+            fill=(255, 255, 255, 255),
+        )
+        self._draw_text_with_shadow(
+            draw,
+            (time_x, y + 42),
+            time_text,
+            time_font,
+            fill=(238, 242, 246, 255),
+        )
+
+    def _draw_remaining_ring(
+        self,
+        draw,
+        top_left: tuple[int, int],
+        remaining_text: str,
+        entry: MapRotationEntry,
+    ) -> None:
+        x, y = top_left
+        size = 112
+        box = (x, y, x + size, y + size)
+        draw.ellipse(box, fill=(0, 0, 0, 156), outline=(255, 255, 255, 34), width=2)
+        draw.arc(box, start=-90, end=-90 + int(360 * self._remaining_fraction(entry)), fill=(49, 191, 139, 255), width=10)
+
+        text_font = self._fit_font(draw, remaining_text, 28, 18, max_width=size - 22, bold=True)
+        label_font = self._font(19)
+        text_box = draw.textbbox((0, 0), remaining_text, font=text_font)
+        text_width = text_box[2] - text_box[0]
+        self._draw_text_with_shadow(
+            draw,
+            (x + (size - text_width) / 2, y + 36),
+            remaining_text,
+            text_font,
+            fill=(255, 255, 255, 255),
+        )
+        label = "剩余"
+        label_box = draw.textbbox((0, 0), label, font=label_font)
+        label_width = label_box[2] - label_box[0]
+        draw.text(
+            (x + (size - label_width) / 2, y + 69),
+            label,
+            font=label_font,
+            fill=(220, 226, 233, 230),
+        )
+
+    def _draw_horizontal_gradient(
+        self,
+        canvas,
+        y: int,
+        height: int,
+        alpha: int,
+        left: bool = True,
+    ) -> None:
+        width = canvas.size[0]
+        gradient = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        pixels = gradient.load()
+        for x in range(width):
+            ratio = 1 - (x / max(1, width - 1)) if left else x / max(1, width - 1)
+            current_alpha = int(alpha * (ratio ** 1.7))
+            for row in range(height):
+                pixels[x, row] = (0, 0, 0, current_alpha)
+        canvas.alpha_composite(gradient, (0, y))
+
+    def _map_background(
+        self,
+        entry: MapRotationEntry,
+        size: tuple[int, int],
+        focus_y: float,
+    ):
+        asset_path = self._resolve_map_asset_path(entry.map_name)
+        if asset_path.exists():
+            with Image.open(asset_path) as raw:
+                source = raw.convert("RGBA")
+        else:
+            source = self._placeholder_map_background(size, entry.map_name)
+
+        resampling = getattr(Image, "Resampling", Image).LANCZOS
+        background = ImageOps.fit(
+            source,
+            size,
+            method=resampling,
+            centering=(0.5, focus_y),
+        )
+        return background.filter(ImageFilter.GaussianBlur(radius=0.4))
+
+    def _placeholder_map_background(self, size: tuple[int, int], map_name: str):
+        width, height = size
+        image = Image.new("RGBA", size, (23, 28, 36, 255))
+        draw = ImageDraw.Draw(image)
+        for row in range(height):
+            shade = int(28 + 36 * row / max(1, height - 1))
+            draw.line((0, row, width, row), fill=(shade, shade + 8, shade + 18, 255))
+        font = self._fit_font(draw, map_name or "未知地图", 42, 24, width - 80, bold=True)
+        self._draw_text_with_shadow(
+            draw,
+            (38, height // 2 - 24),
+            map_name or "未知地图",
+            font,
+            fill=(230, 236, 244, 230),
+        )
+        return image
+
+    def _resolve_map_asset_path(self, map_name: str) -> Path:
+        normalized = str(map_name or "").strip()
+        aliases = {
+            "Broken Moon": "Broken_Moon.png",
+            "E-District": "E-District.png",
+            "Kings Canyon": "Kings_Canyon.png",
+            "Olympus": "Olympus.png",
+            "Storm Point": "Storm_Point.png",
+            "World's Edge": "Worlds_Edge.png",
+            "Worlds Edge": "Worlds_Edge.png",
+        }
+        candidates: list[str] = []
+        if normalized in aliases:
+            candidates.append(aliases[normalized])
+        if normalized:
+            slug = normalized.replace("'", "").replace("’", "").replace(" ", "_")
+            slug = "".join(ch for ch in slug if ch.isalnum() or ch in {"_", "-"})
+            if slug:
+                candidates.append(f"{slug}.png")
+        candidates.append("unknown.png")
+
+        for candidate in candidates:
+            path = self._MAP_ASSET_DIR / candidate
+            if path.exists():
+                return path
+        return self._MAP_ASSET_DIR / candidates[0]
+
+    def _map_card_name(self, entry: MapRotationEntry) -> str:
+        name = (entry.map_name_zh or entry.map_name or "未知地图").strip()
+        return name or "未知地图"
+
+    def _format_rotation_range_short(self, entry: MapRotationEntry) -> str:
+        start = self._timestamp_to_beijing_datetime(entry.start_timestamp)
+        end = self._timestamp_to_beijing_datetime(entry.end_timestamp)
+        if start and end:
+            if start.date() == end.date():
+                return f"{start:%H:%M} - {end:%H:%M}"
+            return f"{start:%m-%d %H:%M} - {end:%m-%d %H:%M}"
+        start_text = entry.readable_start or "未知"
+        end_text = entry.readable_end or "未知"
+        return f"{start_text} - {end_text}"
+
+    def _format_remaining_for_card(self, entry: MapRotationEntry) -> str:
+        seconds = entry.remaining_secs
+        if seconds is None:
+            seconds = self._remaining_seconds_from_timer(entry.remaining_timer)
+        if seconds is None and entry.end_timestamp:
+            seconds = max(0, int(entry.end_timestamp - datetime.now(timezone.utc).timestamp()))
+        if seconds is None:
+            return entry.remaining_timer or "未知"
+
+        minutes = max(0, int(seconds) // 60)
+        days = minutes // 1440
+        hours = (minutes % 1440) // 60
+        mins = minutes % 60
+        if days:
+            return f"{days}天{hours}时"
+        if hours:
+            return f"{hours}时{mins}分"
+        return f"{mins}分"
+
+    @staticmethod
+    def _remaining_seconds_from_timer(timer: str) -> int | None:
+        parts = str(timer or "").strip().split(":")
+        if len(parts) not in {2, 3} or not all(part.isdigit() for part in parts):
+            return None
+        numbers = [int(part) for part in parts]
+        if len(numbers) == 2:
+            minutes, seconds = numbers
+            return minutes * 60 + seconds
+        hours, minutes, seconds = numbers
+        return hours * 3600 + minutes * 60 + seconds
+
+    def _remaining_fraction(self, entry: MapRotationEntry) -> float:
+        if entry.remaining_secs is not None and entry.duration_secs:
+            return min(1.0, max(0.0, entry.remaining_secs / entry.duration_secs))
+        seconds = self._remaining_seconds_from_timer(entry.remaining_timer)
+        if seconds is not None and entry.duration_secs:
+            return min(1.0, max(0.0, seconds / entry.duration_secs))
+        if entry.start_timestamp and entry.end_timestamp:
+            total = entry.end_timestamp - entry.start_timestamp
+            if total > 0:
+                remaining = entry.end_timestamp - datetime.now(timezone.utc).timestamp()
+                return min(1.0, max(0.0, remaining / total))
+        return 0.72
+
+    @staticmethod
+    def _timestamp_to_beijing_datetime(timestamp: int):
+        if not timestamp:
+            return None
+        try:
+            return datetime.fromtimestamp(int(timestamp), tz=timezone.utc).astimezone(
+                SHANGHAI_TZ
+            )
+        except Exception:
+            return None
+
+    def _font(self, size: int, bold: bool = False):
+        candidates = [
+            r"C:\Windows\Fonts\msyhbd.ttc" if bold else r"C:\Windows\Fonts\msyh.ttc",
+            r"C:\Windows\Fonts\simhei.ttf",
+            r"C:\Windows\Fonts\simsun.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
+            if bold
+            else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc"
+            if bold
+            else "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+            if bold
+            else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+        for font_path in candidates:
+            try:
+                path = Path(font_path)
+                if path.exists():
+                    return ImageFont.truetype(str(path), size=size)
+            except Exception:
+                continue
+        return ImageFont.load_default()
+
+    def _fit_font(
+        self,
+        draw,
+        text: str,
+        size: int,
+        min_size: int,
+        max_width: int,
+        bold: bool = False,
+    ):
+        current_size = size
+        while current_size >= min_size:
+            font = self._font(current_size, bold=bold)
+            box = draw.textbbox((0, 0), text, font=font)
+            if box[2] - box[0] <= max_width:
+                return font
+            current_size -= 2
+        return self._font(min_size, bold=bold)
+
+    @staticmethod
+    def _draw_text_with_shadow(draw, xy, text: str, font, fill) -> None:
+        x, y = xy
+        draw.text((x + 2, y + 2), text, font=font, fill=(0, 0, 0, 180))
+        draw.text((x, y), text, font=font, fill=fill)
+
+    def _render_predator_info_image(self, predator_info: PredatorInfo) -> Path:
+        if Image is None:
+            raise RuntimeError("缺少 Pillow，无法生成猎杀线图片")
+        if not self._PREDATOR_TEMPLATE_PATH.exists():
+            raise FileNotFoundError(f"缺少猎杀线图片模板: {self._PREDATOR_TEMPLATE_PATH}")
+
+        output_dir = self._predator_card_output_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        cache_key = self._predator_info_image_cache_key(output_dir, predator_info)
+        cached_path = self._get_cached_predator_info_image(cache_key)
+        if cached_path is not None:
+            return cached_path
+
+        image = self._build_predator_info_card(predator_info)
+        output_path = output_dir / f"predator_info_{now_epoch_ms()}.png"
+        image.save(output_path, format="PNG", optimize=True)
+        self._set_cached_predator_info_image(cache_key, output_path)
+        self._cleanup_old_predator_cards(output_dir)
+        return output_path
+
+    def _get_cached_predator_info_image(self, cache_key: tuple) -> Path | None:
+        cache = getattr(self, "_predator_info_image_cache", None)
+        if not isinstance(cache, dict):
+            return None
+        cached = cache.get(cache_key)
+        if not cached:
+            return None
+        saved_at, image_path = cached
+        if time.monotonic() - saved_at > self._PREDATOR_IMAGE_CACHE_TTL_SECONDS:
+            cache.pop(cache_key, None)
+            return None
+        image_path = Path(image_path)
+        if not image_path.exists():
+            cache.pop(cache_key, None)
+            return None
+        return image_path
+
+    def _set_cached_predator_info_image(
+        self, cache_key: tuple, image_path: Path
+    ) -> None:
+        cache = getattr(self, "_predator_info_image_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._predator_info_image_cache = cache
+        cache[cache_key] = (time.monotonic(), Path(image_path))
+
+    def _predator_info_image_cache_key(
+        self, output_dir: Path, predator_info: PredatorInfo
+    ) -> tuple:
+        platform_key = []
+        for platform in ("PC", "PS4", "X1", "SWITCH"):
+            stats = predator_info.platforms.get(platform)
+            if stats is None:
+                platform_key.append((platform, None))
+                continue
+            platform_key.append(
+                (
+                    platform,
+                    stats.threshold_rp,
+                    stats.masters_and_preds,
+                    stats.update_timestamp,
+                )
+            )
+
+        try:
+            template_mtime = self._PREDATOR_TEMPLATE_PATH.stat().st_mtime_ns
+        except OSError:
+            template_mtime = 0
+        return (str(output_dir.resolve()), template_mtime, tuple(platform_key))
+
+    def _predator_card_output_dir(self) -> Path:
+        data_dir = getattr(self, "_data_dir", None)
+        if data_dir is None:
+            return self._PLUGIN_ROOT / "_generated" / "predator_cards"
+        return Path(data_dir) / "predator_cards"
+
+    def _cleanup_old_predator_cards(self, output_dir: Path, keep: int = 8) -> None:
+        try:
+            files = sorted(
+                output_dir.glob("predator_info_*.png"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+            for file in files[keep:]:
+                file.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug(f"清理猎杀线缓存图片失败: {exc}")
+
+    def _build_predator_info_card(self, predator_info: PredatorInfo):
+        with Image.open(self._PREDATOR_TEMPLATE_PATH) as raw:
+            canvas = raw.convert("RGBA")
+        draw = ImageDraw.Draw(canvas)
+
+        # 模板来自用户提供的固定版式，这里只在预留黑框内写入实时数据。
+        query_text = self._now_str()
+        time_font = self._fit_font(draw, query_text, 38, 28, 350, bold=True)
+        update_text = self._format_predator_update_time(
+            self._select_predator_platforms(predator_info)
+        ) or "暂无"
+        update_font = self._fit_font(draw, update_text, 38, 28, 350, bold=True)
+        value_fill = self._PREDATOR_NEUTRAL
+
+        self._draw_centered_predator_text(
+            draw, (636, 244, 1053, 318), query_text, time_font, value_fill
+        )
+        self._draw_centered_predator_text(
+            draw, (636, 354, 1053, 426), update_text, update_font, value_fill
+        )
+
+        rows = {
+            "PC": ((290, 535, 715, 648), (790, 536, 1078, 615)),
+            "PS4": ((290, 756, 715, 869), (790, 756, 1078, 835)),
+            "X1": ((290, 976, 715, 1089), (790, 976, 1078, 1055)),
+            "SWITCH": ((290, 1197, 715, 1311), (790, 1197, 1078, 1276)),
+        }
+        for platform, (threshold_box, count_box) in rows.items():
+            stats = predator_info.platforms.get(platform)
+            threshold = self._predator_threshold_text(stats)
+            count = self._predator_master_count_text(stats)
+            threshold_font = self._fit_font(
+                draw,
+                threshold,
+                58,
+                36,
+                threshold_box[2] - threshold_box[0] - 36,
+                bold=True,
+            )
+            count_font = self._fit_font(
+                draw,
+                count,
+                60,
+                34,
+                count_box[2] - count_box[0] - 42,
+                bold=True,
+            )
+            self._draw_centered_predator_text(
+                draw,
+                threshold_box,
+                threshold,
+                threshold_font,
+                self._predator_threshold_fill(stats),
+            )
+            self._draw_centered_predator_text(
+                draw,
+                count_box,
+                count,
+                count_font,
+                self._predator_master_count_fill(stats),
+            )
+
+        return canvas.convert("RGB")
+
+    def _draw_centered_predator_text(
+        self,
+        draw,
+        box: tuple[int, int, int, int],
+        text: str,
+        font,
+        fill: tuple[int, int, int, int],
+    ) -> None:
+        left, top, right, bottom = box
+        x = self._centered_text_x(draw, text, font, left, right)
+        y = self._centered_text_y(draw, text, font, top, bottom)
+        draw.text(
+            (x, y),
+            text,
+            font=font,
+            fill=fill,
+            stroke_width=2,
+            stroke_fill=(0, 0, 0, 185),
+        )
+
+    def _predator_threshold_text(self, stats: PredatorPlatformStats | None) -> str:
+        if stats is None:
+            return "暂无"
+        return f"{self._format_number(stats.threshold_rp)} RP"
+
+    def _predator_master_count_text(self, stats: PredatorPlatformStats | None) -> str:
+        if stats is None:
+            return "暂无"
+        return self._format_number(stats.masters_and_preds)
+
+    def _predator_threshold_fill(
+        self, stats: PredatorPlatformStats | None
+    ) -> tuple[int, int, int, int]:
+        if stats is None:
+            return self._PREDATOR_NEUTRAL
+        if stats.threshold_rp <= 16000:
+            return self._PREDATOR_GREEN
+        return self._PREDATOR_DEEP_RED
+
+    def _predator_master_count_fill(
+        self, stats: PredatorPlatformStats | None
+    ) -> tuple[int, int, int, int]:
+        if stats is None:
+            return self._PREDATOR_NEUTRAL
+        if stats.masters_and_preds < 750:
+            return self._PREDATOR_GREEN
+        return self._PREDATOR_DEEP_RED
+
+    def _format_predator_info_text(
+        self, predator_info: PredatorInfo, selected_platform: str = ""
+    ) -> str:
+        platform_stats = self._select_predator_platforms(predator_info, selected_platform)
+        if not platform_stats:
+            return "\n".join(
+                [
+                    self._time_line(),
+                    "⚠️ 暂未获取到本赛季猎杀线数据，请稍后再试",
+                ]
+            )
+
+        updated_at = self._format_predator_update_time(platform_stats)
+        lines = [
+            "🏆 本赛季猎杀线",
+            f"🕒 查询时间：{self._now_str()}",
+        ]
+        if updated_at:
+            lines.append(f"🔄 数据更新：{updated_at}")
+        lines.append("——")
+
+        for stats in platform_stats:
+            lines.append(self._format_predator_platform_line(stats))
+
+        lines.append("ℹ️ 大师数量来自 API 的大师+猎杀总数")
+        return "\n".join(lines)
+
+    def _select_predator_platforms(
+        self, predator_info: PredatorInfo, selected_platform: str = ""
+    ) -> list[PredatorPlatformStats]:
+        if selected_platform:
+            stats = predator_info.platforms.get(selected_platform)
+            return [stats] if stats else []
+
+        ordered = []
+        for platform in ("PC", "PS4", "X1", "SWITCH"):
+            stats = predator_info.platforms.get(platform)
+            if stats is not None:
+                ordered.append(stats)
+        return ordered
+
+    def _format_predator_platform_line(self, stats: PredatorPlatformStats) -> str:
+        platform = self._format_platform_with_icon(stats.platform)
+        threshold = self._format_number(stats.threshold_rp)
+        count = self._format_number(stats.masters_and_preds)
+        return f"{platform}：猎杀线 {threshold} RP｜大师数量 {count}（包含猎杀）"
+
+    def _format_predator_update_time(
+        self, platform_stats: list[PredatorPlatformStats]
+    ) -> str:
+        timestamps = [item.update_timestamp for item in platform_stats if item.update_timestamp]
+        if not timestamps:
+            return ""
+        return self._format_timestamp_to_beijing(max(timestamps))
+
+    def _format_map_name(self, entry: MapRotationEntry) -> str:
+        if entry.map_name_zh and entry.map_name_zh != entry.map_name:
+            return f"{entry.map_name_zh} / {entry.map_name}"
+        return entry.map_name_zh or entry.map_name or "未知"
+
+    def _format_rotation_range(self, entry: MapRotationEntry) -> str:
+        start_text = self._format_timestamp_to_beijing(entry.start_timestamp)
+        end_text = self._format_timestamp_to_beijing(entry.end_timestamp)
+        if not start_text:
+            start_text = entry.readable_start or "未知"
+        if not end_text:
+            end_text = entry.readable_end or "未知"
+        return f"{start_text} ~ {end_text}"
+
+    def _format_timestamp_to_beijing(self, timestamp: int) -> str:
+        if not timestamp:
+            return ""
+        try:
+            dt = datetime.fromtimestamp(int(timestamp), tz=timezone.utc)
+            bj = dt.astimezone(SHANGHAI_TZ)
+            return bj.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return ""
+
+    def _format_platform_with_icon(self, platform: str) -> str:
+        icons = {
+            "PC": "🖥️ PC",
+            "PS4": "🎮 PlayStation",
+            "X1": "🎮 Xbox",
+            "SWITCH": "🎮 Switch",
+        }
+        return icons.get(platform, self._format_platform(platform))
+
+    @staticmethod
+    def _format_number(value: int) -> str:
+        try:
+            return f"{int(value):,}"
+        except Exception:
+            return str(value)
 
     def _format_season_info(self, season_info: SeasonInfo) -> str:
         season_label = "未知"

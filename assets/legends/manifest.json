@@ -1,0 +1,338 @@
+{
+  "alter": {
+    "name": "Alter",
+    "zh_name": "变幻",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/5/56/Portrait_Alter_square.png/revision/latest?cb=20240509233556",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Alter+square.png",
+    "source_content_type": "image/webp",
+    "file": "alter.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "ash": {
+    "name": "Ash",
+    "zh_name": "艾许",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/d/d3/Portrait_Ash_square.png/revision/latest?cb=20211107055325",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Ash+square.png",
+    "source_content_type": "image/webp",
+    "file": "ash.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "axle": {
+    "name": "Axle",
+    "zh_name": "艾克赛尔",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/7/7b/Portrait_Axle_square.png/revision/latest?cb=20260503094558",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Axle+square.png",
+    "source_content_type": "image/webp",
+    "file": "axle.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "ballistic": {
+    "name": "Ballistic",
+    "zh_name": "弹道",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/3/32/Portrait_Ballistic_square.png/revision/latest?cb=20230509214928",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Ballistic+square.png",
+    "source_content_type": "image/webp",
+    "file": "ballistic.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "bangalore": {
+    "name": "Bangalore",
+    "zh_name": "班加罗尔",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/3/37/Portrait_Bangalore_square.png/revision/latest?cb=20191020032826",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Bangalore+square.png",
+    "source_content_type": "image/webp",
+    "file": "bangalore.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "bloodhound": {
+    "name": "Bloodhound",
+    "zh_name": "寻血猎犬",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/c/ce/Portrait_Bloodhound_square.png/revision/latest?cb=20191020032847",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Bloodhound+square.png",
+    "source_content_type": "image/webp",
+    "file": "bloodhound.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "catalyst": {
+    "name": "Catalyst",
+    "zh_name": "卡特莉丝",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/9/9a/Portrait_Catalyst_square.png/revision/latest?cb=20221110185140",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Catalyst+square.png",
+    "source_content_type": "image/webp",
+    "file": "catalyst.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "caustic": {
+    "name": "Caustic",
+    "zh_name": "侵蚀",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/4/45/Portrait_Caustic_square.png/revision/latest?cb=20191020032907",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Caustic+square.png",
+    "source_content_type": "image/webp",
+    "file": "caustic.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "conduit": {
+    "name": "Conduit",
+    "zh_name": "导管",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/2/27/Portrait_Conduit_square.png/revision/latest?cb=20231104105021",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Conduit+square.png",
+    "source_content_type": "image/webp",
+    "file": "conduit.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "crypto": {
+    "name": "Crypto",
+    "zh_name": "密客",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/e/e6/Portrait_Crypto_square.png/revision/latest?cb=20200304205255",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Crypto+square.png",
+    "source_content_type": "image/webp",
+    "file": "crypto.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "fuse": {
+    "name": "Fuse",
+    "zh_name": "暴雷",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/b/be/Portrait_Fuse_square.png/revision/latest?cb=20210203045144",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Fuse+square.png",
+    "source_content_type": "image/webp",
+    "file": "fuse.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "gibraltar": {
+    "name": "Gibraltar",
+    "zh_name": "直布罗陀",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/0/00/Portrait_Gibraltar_square.png/revision/latest?cb=20191020032940",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Gibraltar+square.png",
+    "source_content_type": "image/webp",
+    "file": "gibraltar.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "horizon": {
+    "name": "Horizon",
+    "zh_name": "地平线",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/9/97/Portrait_Horizon_square.png/revision/latest?cb=20210103222320",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Horizon+square.png",
+    "source_content_type": "image/webp",
+    "file": "horizon.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "lifeline": {
+    "name": "Lifeline",
+    "zh_name": "命脉",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/f/fa/Portrait_Lifeline_square.png/revision/latest?cb=20191020032958",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Lifeline+square.png",
+    "source_content_type": "image/webp",
+    "file": "lifeline.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "loba": {
+    "name": "Loba",
+    "zh_name": "罗芭",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/0/05/Portrait_Loba_square.png/revision/latest?cb=20200512224448",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Loba+square.png",
+    "source_content_type": "image/webp",
+    "file": "loba.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "mad_maggie": {
+    "name": "Mad Maggie",
+    "zh_name": "疯玛吉",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/f/f7/Portrait_Mad_Maggie_square.png/revision/latest?cb=20220210003018",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Mad+Maggie+square.png",
+    "source_content_type": "image/webp",
+    "file": "mad_maggie.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "mirage": {
+    "name": "Mirage",
+    "zh_name": "幻象",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/c/c8/Portrait_Mirage_square.png/revision/latest?cb=20191020033017",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Mirage+square.png",
+    "source_content_type": "image/webp",
+    "file": "mirage.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "newcastle": {
+    "name": "Newcastle",
+    "zh_name": "纽卡斯尔",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/0/0f/Portrait_Newcastle_square.png/revision/latest?cb=20220512070919",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Newcastle+square.png",
+    "source_content_type": "image/webp",
+    "file": "newcastle.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "octane": {
+    "name": "Octane",
+    "zh_name": "动力小子",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/9/9a/Portrait_Octane_square.png/revision/latest?cb=20191020033035",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Octane+square.png",
+    "source_content_type": "image/webp",
+    "file": "octane.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "pathfinder": {
+    "name": "Pathfinder",
+    "zh_name": "探路者",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/f/f5/Portrait_Pathfinder_square.png/revision/latest?cb=20191020033054",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Pathfinder+square.png",
+    "source_content_type": "image/webp",
+    "file": "pathfinder.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "rampart": {
+    "name": "Rampart",
+    "zh_name": "兰伯特",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/0/0f/Portrait_Rampart_square.png/revision/latest?cb=20210824202031",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Rampart+square.png",
+    "source_content_type": "image/webp",
+    "file": "rampart.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "revenant": {
+    "name": "Revenant",
+    "zh_name": "亡灵",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/d/d1/Portrait_Revenant_square.png/revision/latest?cb=20230809161052",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Revenant+square.png",
+    "source_content_type": "image/webp",
+    "file": "revenant.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "seer": {
+    "name": "Seer",
+    "zh_name": "希尔",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/f/f2/Portrait_Seer_square.png/revision/latest?cb=20210804121823",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Seer+square.png",
+    "source_content_type": "image/webp",
+    "file": "seer.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "sparrow": {
+    "name": "Sparrow",
+    "zh_name": "琉雀",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/f/f2/Portrait_Sparrow_square.png/revision/latest?cb=20260502214821",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Sparrow+square.png",
+    "source_content_type": "image/webp",
+    "file": "sparrow.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "valkyrie": {
+    "name": "Valkyrie",
+    "zh_name": "瓦尔基里",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/b/b0/Portrait_Valkyrie_square.png/revision/latest?cb=20210504212601",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Valkyrie+square.png",
+    "source_content_type": "image/webp",
+    "file": "valkyrie.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "vantage": {
+    "name": "Vantage",
+    "zh_name": "万蒂奇",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/f/f8/Portrait_Vantage_square.png/revision/latest?cb=20220810131703",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Vantage+square.png",
+    "source_content_type": "image/webp",
+    "file": "vantage.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "wattson": {
+    "name": "Wattson",
+    "zh_name": "沃特森",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/2/22/Portrait_Wattson_square.png/revision/latest?cb=20191020033112",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Wattson+square.png",
+    "source_content_type": "image/webp",
+    "file": "wattson.png",
+    "size": [
+      256,
+      256
+    ]
+  },
+  "wraith": {
+    "name": "Wraith",
+    "zh_name": "恶灵",
+    "source": "https://static.wikia.nocookie.net/apexlegends_gamepedia_en/images/6/67/Portrait_Wraith_square.png/revision/latest?cb=20191020033129",
+    "source_api": "https://apexlegends.fandom.com/api.php?action=query&format=json&prop=imageinfo&iiprop=url&titles=File%3APortrait+Wraith+square.png",
+    "source_content_type": "image/webp",
+    "file": "wraith.png",
+    "size": [
+      256,
+      256
+    ]
+  }
+}

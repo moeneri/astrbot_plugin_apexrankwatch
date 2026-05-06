@@ -1,0 +1,29 @@
+{
+  "in_match": {
+    "file": "in_match.png",
+    "text": "比赛中",
+    "sub": "IN MATCH",
+    "size": [
+      346,
+      330
+    ]
+  },
+  "in_lobby": {
+    "file": "in_lobby.png",
+    "text": "大厅中",
+    "sub": "IN LOBBY",
+    "size": [
+      346,
+      330
+    ]
+  },
+  "offline": {
+    "file": "offline.png",
+    "text": "离线",
+    "sub": "OFFLINE",
+    "size": [
+      346,
+      330
+    ]
+  }
+}
