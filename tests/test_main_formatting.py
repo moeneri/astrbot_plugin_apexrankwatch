@@ -596,6 +596,22 @@ class MainFormattingTests(unittest.TestCase):
 
         self.assertEqual(formatter._season_end_label(), "赛季结束时间")
 
+    def test_season_source_label_keeps_readme_card_compact(self) -> None:
+        formatter = object.__new__(main.Main)
+
+        self.assertEqual(
+            formatter._season_source_label(
+                "https://apexlegendsstatus.com/new-season-countdown"
+            ),
+            "来源 apexlegendsstatus.com",
+        )
+        self.assertEqual(
+            formatter._season_source_label(
+                "apexlegendsstatus.com/new-season-countdown"
+            ),
+            "来源 apexlegendsstatus.com",
+        )
+
     @staticmethod
     def _bbox_center(box: tuple[int, int, int, int]) -> tuple[float, float]:
         return ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
@@ -733,7 +749,12 @@ class MainFormattingTests(unittest.TestCase):
             for red, green, blue in avatar_pixels
             if max(red, green, blue) - min(red, green, blue) > 35
         )
-        rank_blue = sum(1 for red, green, blue in rank_pixels if blue > 110 and red < 120)
+        rank_color = sum(
+            1
+            for red, green, blue in rank_pixels
+            if max(red, green, blue) - min(red, green, blue) > 35
+            and max(red, green, blue) > 90
+        )
         legend_color = sum(
             1
             for red, green, blue in legend_pixels
@@ -744,7 +765,7 @@ class MainFormattingTests(unittest.TestCase):
         )
 
         self.assertGreater(avatar_color, 1500)
-        self.assertGreater(rank_blue, 1200)
+        self.assertGreater(rank_color, 1200)
         self.assertGreater(legend_color, 1500)
         self.assertGreater(status_amber, 1500)
 
@@ -870,6 +891,249 @@ class MainFormattingTests(unittest.TestCase):
             self.assertEqual(results[0][0][0], "Image")
             image_path = Path(results[0][0][1]["path"])
             self.assertTrue(image_path.exists())
+
+    def test_apexhelp_command_returns_image_card(self) -> None:
+        class FakeEvent:
+            def get_platform_name(self):
+                return "test"
+
+            def chain_result(self, chain):
+                return chain
+
+            def plain_result(self, text):
+                return [("Plain", {"text": text})]
+
+        async def collect_results(formatter):
+            results = []
+            async for result in formatter.apexrankhelp(FakeEvent()):
+                results.append(result)
+            return results
+
+        formatter = object.__new__(main.Main)
+        formatter._config = types.SimpleNamespace(
+            check_interval=2,
+            min_valid_score=1,
+            query_blocklist="",
+        )
+        formatter._runtime_blacklist = set()
+        formatter._get_config_blacklist = lambda: set()
+        formatter._guard_access = lambda event: ""
+        formatter._prefer_quote_reply = lambda event: False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            formatter._data_dir = Path(tmpdir)
+            results = asyncio.run(collect_results(formatter))
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0][0][0], "Image")
+            image_path = Path(results[0][0][1]["path"])
+            self.assertTrue(image_path.exists())
+            with Image.open(image_path) as image:
+                self.assertEqual(image.format, "PNG")
+                self.assertGreaterEqual(image.size[0], 900)
+
+    def test_apexhelp_card_sections_are_vertical_and_include_aliases(self) -> None:
+        formatter = object.__new__(main.Main)
+        formatter._config = types.SimpleNamespace(
+            check_interval=2,
+            min_valid_score=1,
+            query_blocklist="",
+        )
+        formatter._runtime_blacklist = set()
+        formatter._get_config_blacklist = lambda: set()
+
+        sections = formatter._help_card_sections()
+        boxes = [box for box, _, _ in sections]
+        y_positions = [box[1] for box in boxes]
+        commands = "\n".join(command for _, _, rows in sections for command, _ in rows)
+
+        self.assertEqual(y_positions, sorted(y_positions))
+        self.assertTrue(all(box[0] == 54 and box[2] == 1068 for box in boxes))
+        self.assertIn("/apexpredator [平台] /apex猎杀 /猎杀", commands)
+        self.assertIn("/取消持续视奸", commands)
+
+    def test_apexranklist_command_returns_image_card(self) -> None:
+        class FakeEvent:
+            unified_msg_origin = "origin"
+
+            def get_platform_name(self):
+                return "test"
+
+            def chain_result(self, chain):
+                return chain
+
+            def plain_result(self, text):
+                return [("Plain", {"text": text})]
+
+        players = {
+            "name:yumola@PC": main.PlayerRecord(
+                player_name="Yumola",
+                platform="PC",
+                lookup_id="Yumola",
+                use_uid=False,
+                rank_score=12671,
+                rank_name="钻石",
+                rank_div=4,
+                global_rank_percent="6.66",
+                selected_legend="动力小子",
+                legend_kills_percent="",
+                last_checked=1778054400000,
+            ),
+            "name:axle@PC": main.PlayerRecord(
+                player_name="AxleFan",
+                platform="PC",
+                lookup_id="AxleFan",
+                use_uid=False,
+                rank_score=18999,
+                rank_name="大师",
+                rank_div=0,
+                global_rank_percent="0.50",
+                selected_legend="艾克赛尔",
+                legend_kills_percent="",
+                last_checked=1778058000000,
+            ),
+        }
+        group = types.SimpleNamespace(origin="origin", players=players)
+
+        async def collect_results(formatter):
+            results = []
+            async for result in formatter.apexranklist(FakeEvent()):
+                results.append(result)
+            return results
+
+        formatter = object.__new__(main.Main)
+        formatter._config = types.SimpleNamespace(check_interval=2, min_valid_score=1)
+        formatter._store = types.SimpleNamespace(
+            get_group=lambda group_id: group,
+            save=lambda: None,
+        )
+        formatter._guard_access = lambda event, require_group=False: ""
+        formatter._get_group_id = lambda event: "10001"
+        formatter._prefer_quote_reply = lambda event: False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            formatter._data_dir = Path(tmpdir)
+            results = asyncio.run(collect_results(formatter))
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0][0][0], "Image")
+            image_path = Path(results[0][0][1]["path"])
+            self.assertTrue(image_path.exists())
+            with Image.open(image_path) as image:
+                self.assertEqual(image.format, "PNG")
+                self.assertGreaterEqual(image.size[0], 900)
+
+    def test_apexrankwatch_success_returns_image_card(self) -> None:
+        class FakeEvent:
+            unified_msg_origin = "origin"
+
+            def get_platform_name(self):
+                return "test"
+
+            def chain_result(self, chain):
+                return chain
+
+            def plain_result(self, text):
+                return [("Plain", {"text": text})]
+
+        class FakeApi:
+            async def fetch_player_stats_auto(self, identifier, platform, use_uid):
+                return (
+                    apex_service.ApexPlayerStats(
+                        name=identifier,
+                        uid="123456",
+                        level=500,
+                        rank_score=12671,
+                        rank_name="钻石",
+                        rank_div=4,
+                        global_rank_percent="6.66",
+                        is_online=True,
+                        selected_legend="动力小子",
+                        legend_kills_rank=None,
+                        current_state="比赛中",
+                        is_in_lobby_or_match=True,
+                        platform="PC",
+                    ),
+                    "PC",
+                )
+
+        group = types.SimpleNamespace(players={})
+
+        def set_player(group_id, player_key, record):
+            group.players[player_key] = record
+
+        async def fake_send_active_message(origin, message):
+            return True
+
+        async def collect_results(formatter):
+            results = []
+            async for result in formatter.apexrankwatch(FakeEvent(), "Yumola", "PC"):
+                results.append(result)
+            return results
+
+        formatter = object.__new__(main.Main)
+        formatter._config = types.SimpleNamespace(api_key="test-key", min_valid_score=0)
+        formatter._api = FakeApi()
+        formatter._store = types.SimpleNamespace(
+            ensure_group=lambda group_id, origin: group,
+            set_player=set_player,
+            save=lambda: None,
+        )
+        formatter._guard_access = lambda event, require_group=False: ""
+        formatter._parse_player_platform = lambda event, player_name, platform: (player_name, platform)
+        formatter._get_group_id = lambda event: "10001"
+        formatter._is_blacklisted = lambda player_name: False
+        formatter._is_query_blocked = lambda player_name: False
+        formatter._parse_identifier = lambda player_name: (player_name, False)
+        formatter._prefer_quote_reply = lambda event: False
+        formatter._send_active_message = fake_send_active_message
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            formatter._data_dir = Path(tmpdir)
+            results = asyncio.run(collect_results(formatter))
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0][0][0], "Image")
+            image_path = Path(results[0][0][1]["path"])
+            self.assertTrue(image_path.exists())
+            with Image.open(image_path) as image:
+                self.assertEqual(image.format, "PNG")
+                self.assertGreaterEqual(image.size[0], 900)
+
+    def test_monitor_added_card_draws_selected_legend_avatar(self) -> None:
+        formatter = object.__new__(main.Main)
+        formatter._config = types.SimpleNamespace(check_interval=2)
+        player_data = apex_service.ApexPlayerStats(
+            name="Yumola",
+            uid="123456",
+            level=500,
+            rank_score=12671,
+            rank_name="钻石",
+            rank_div=4,
+            global_rank_percent="6.66",
+            is_online=True,
+            selected_legend="动力小子",
+            legend_kills_rank=None,
+            current_state="比赛中",
+            is_in_lobby_or_match=True,
+            platform="PC",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            formatter._data_dir = Path(tmpdir)
+            image_path = formatter._render_monitor_added_image(player_data, "PC")
+
+            with Image.open(image_path).convert("RGB") as image:
+                legend_region = image.crop((410, 826, 520, 914))
+                legend_pixels = list(getattr(legend_region, "get_flattened_data", legend_region.getdata)())
+                colorful_pixels = sum(
+                    1
+                    for red, green, blue in legend_pixels
+                    if max(red, green, blue) - min(red, green, blue) > 45
+                    and not (red > 220 and green > 220 and blue > 220)
+                )
+
+        self.assertGreater(colorful_pixels, 1000)
 
     def test_default_user_avatar_asset_is_formatted_png(self) -> None:
         avatar_path = main.Main._PLUGIN_ROOT / "assets" / "default_user_avatar.png"
@@ -1003,6 +1267,16 @@ class MainFormattingTests(unittest.TestCase):
         self.assertEqual(formatter._resolve_legend_icon_path("动力小子").name, "octane.png")
         self.assertEqual(formatter._resolve_legend_icon_path("艾克赛尔").name, "axle.png")
 
+    def test_rank_icons_resolve_division_specific_assets(self) -> None:
+        formatter = object.__new__(main.Main)
+
+        self.assertEqual(formatter._resolve_rank_icon_path("菜鸟", 4).name, "rookie_4.png")
+        self.assertEqual(formatter._resolve_rank_icon_path("黄金", 1).name, "gold_1.png")
+        self.assertEqual(formatter._resolve_rank_icon_path("Gold", 3).name, "gold_3.png")
+        self.assertEqual(formatter._resolve_rank_icon_path("钻石", 2).name, "diamond_2.png")
+        self.assertEqual(formatter._resolve_rank_icon_path("大师", 1).name, "master.png")
+        self.assertEqual(formatter._resolve_rank_icon_path("猎杀", 4).name, "predator.png")
+
     def test_image_asset_draw_preserves_source_colors(self) -> None:
         formatter = object.__new__(main.Main)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1025,6 +1299,29 @@ class MainFormattingTests(unittest.TestCase):
         self.assertGreater(red_pixels, 1000)
         self.assertGreater(green_pixels, 100)
 
+    def test_image_asset_draw_crops_transparent_padding_before_scaling(self) -> None:
+        formatter = object.__new__(main.Main)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            asset_path = Path(tmpdir) / "padded_asset.png"
+            asset = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+            asset_draw = ImageDraw.Draw(asset)
+            asset_draw.ellipse((96, 96, 160, 160), fill=(60, 170, 230, 255))
+            asset.save(asset_path)
+
+            canvas = Image.new("RGBA", (160, 160), (0, 0, 0, 255))
+            draw = ImageDraw.Draw(canvas)
+            formatter._draw_image_asset(draw, asset_path, (30, 30, 130, 130))
+
+            pasted = canvas.crop((30, 30, 130, 130)).convert("RGB")
+            pixels = list(getattr(pasted, "get_flattened_data", pasted.getdata)())
+            blue_pixels = sum(
+                1
+                for red, green, blue in pixels
+                if blue > 170 and green > 120 and red < 100
+            )
+
+        self.assertGreater(blue_pixels, 4500)
+
     def test_rank_change_asset_folders_include_required_icons(self) -> None:
         ranks = {path.stem for path in main.Main._RANK_ICON_DIR.glob("*.png")}
         legends = {path.stem for path in main.Main._LEGEND_ICON_DIR.glob("*.png")}
@@ -1041,7 +1338,27 @@ class MainFormattingTests(unittest.TestCase):
                 "predator",
             }.issubset(ranks)
         )
+        expected_divisions = {
+            f"{rank}_{division}"
+            for rank in ("rookie", "bronze", "silver", "gold", "platinum", "diamond")
+            for division in (4, 3, 2, 1)
+        }
+        self.assertTrue(expected_divisions.issubset(ranks))
         self.assertTrue({"octane", "vantage", "sparrow", "axle"}.issubset(legends))
+
+    def test_rank_division_assets_are_formatted_pngs(self) -> None:
+        expected_files = [
+            *(f"{rank}_{division}.png" for rank in ("rookie", "bronze", "silver", "gold", "platinum", "diamond") for division in (4, 3, 2, 1)),
+            "master.png",
+            "predator.png",
+        ]
+
+        for filename in expected_files:
+            path = main.Main._RANK_ICON_DIR / filename
+            self.assertTrue(path.exists(), filename)
+            with Image.open(path) as image:
+                self.assertEqual(image.size, (256, 256), filename)
+                self.assertEqual(image.format, "PNG", filename)
 
     def test_legend_asset_manifest_keeps_chinese_names(self) -> None:
         manifest_path = main.Main._LEGEND_ICON_DIR / "manifest.json"

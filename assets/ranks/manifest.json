@@ -1,9 +1,107 @@
 {
+  "rookie_4": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/rookie4.png",
+    "file": "rookie_4.png",
+    "name": "Rookie 4",
+    "zh_name": "菜鸟 4",
+    "rank": "rookie",
+    "division": 4,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "rookie_3": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/rookie3.png",
+    "file": "rookie_3.png",
+    "name": "Rookie 3",
+    "zh_name": "菜鸟 3",
+    "rank": "rookie",
+    "division": 3,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "rookie_2": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/rookie2.png",
+    "file": "rookie_2.png",
+    "name": "Rookie 2",
+    "zh_name": "菜鸟 2",
+    "rank": "rookie",
+    "division": 2,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "rookie_1": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/rookie1.png",
+    "file": "rookie_1.png",
+    "name": "Rookie 1",
+    "zh_name": "菜鸟 1",
+    "rank": "rookie",
+    "division": 1,
+    "size": [
+      256,
+      256
+    ]
+  },
   "rookie": {
     "source": "https://api.mozambiquehe.re/assets/ranks/rookie4.png",
     "file": "rookie.png",
     "name": "Rookie",
     "zh_name": "菜鸟",
+    "rank": "rookie",
+    "division": null,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "bronze_4": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/bronze4.png",
+    "file": "bronze_4.png",
+    "name": "Bronze 4",
+    "zh_name": "青铜 4",
+    "rank": "bronze",
+    "division": 4,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "bronze_3": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/bronze3.png",
+    "file": "bronze_3.png",
+    "name": "Bronze 3",
+    "zh_name": "青铜 3",
+    "rank": "bronze",
+    "division": 3,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "bronze_2": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/bronze2.png",
+    "file": "bronze_2.png",
+    "name": "Bronze 2",
+    "zh_name": "青铜 2",
+    "rank": "bronze",
+    "division": 2,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "bronze_1": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/bronze1.png",
+    "file": "bronze_1.png",
+    "name": "Bronze 1",
+    "zh_name": "青铜 1",
+    "rank": "bronze",
+    "division": 1,
     "size": [
       256,
       256
@@ -14,6 +112,56 @@
     "file": "bronze.png",
     "name": "Bronze",
     "zh_name": "青铜",
+    "rank": "bronze",
+    "division": null,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "silver_4": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/silver4.png",
+    "file": "silver_4.png",
+    "name": "Silver 4",
+    "zh_name": "白银 4",
+    "rank": "silver",
+    "division": 4,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "silver_3": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/silver3.png",
+    "file": "silver_3.png",
+    "name": "Silver 3",
+    "zh_name": "白银 3",
+    "rank": "silver",
+    "division": 3,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "silver_2": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/silver2.png",
+    "file": "silver_2.png",
+    "name": "Silver 2",
+    "zh_name": "白银 2",
+    "rank": "silver",
+    "division": 2,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "silver_1": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/silver1.png",
+    "file": "silver_1.png",
+    "name": "Silver 1",
+    "zh_name": "白银 1",
+    "rank": "silver",
+    "division": 1,
     "size": [
       256,
       256
@@ -24,6 +172,56 @@
     "file": "silver.png",
     "name": "Silver",
     "zh_name": "白银",
+    "rank": "silver",
+    "division": null,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "gold_4": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/gold4.png",
+    "file": "gold_4.png",
+    "name": "Gold 4",
+    "zh_name": "黄金 4",
+    "rank": "gold",
+    "division": 4,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "gold_3": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/gold3.png",
+    "file": "gold_3.png",
+    "name": "Gold 3",
+    "zh_name": "黄金 3",
+    "rank": "gold",
+    "division": 3,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "gold_2": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/gold2.png",
+    "file": "gold_2.png",
+    "name": "Gold 2",
+    "zh_name": "黄金 2",
+    "rank": "gold",
+    "division": 2,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "gold_1": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/gold1.png",
+    "file": "gold_1.png",
+    "name": "Gold 1",
+    "zh_name": "黄金 1",
+    "rank": "gold",
+    "division": 1,
     "size": [
       256,
       256
@@ -34,6 +232,56 @@
     "file": "gold.png",
     "name": "Gold",
     "zh_name": "黄金",
+    "rank": "gold",
+    "division": null,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "platinum_4": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/platinum4.png",
+    "file": "platinum_4.png",
+    "name": "Platinum 4",
+    "zh_name": "白金 4",
+    "rank": "platinum",
+    "division": 4,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "platinum_3": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/platinum3.png",
+    "file": "platinum_3.png",
+    "name": "Platinum 3",
+    "zh_name": "白金 3",
+    "rank": "platinum",
+    "division": 3,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "platinum_2": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/platinum2.png",
+    "file": "platinum_2.png",
+    "name": "Platinum 2",
+    "zh_name": "白金 2",
+    "rank": "platinum",
+    "division": 2,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "platinum_1": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/platinum1.png",
+    "file": "platinum_1.png",
+    "name": "Platinum 1",
+    "zh_name": "白金 1",
+    "rank": "platinum",
+    "division": 1,
     "size": [
       256,
       256
@@ -44,6 +292,56 @@
     "file": "platinum.png",
     "name": "Platinum",
     "zh_name": "白金",
+    "rank": "platinum",
+    "division": null,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "diamond_4": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/diamond4.png",
+    "file": "diamond_4.png",
+    "name": "Diamond 4",
+    "zh_name": "钻石 4",
+    "rank": "diamond",
+    "division": 4,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "diamond_3": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/diamond3.png",
+    "file": "diamond_3.png",
+    "name": "Diamond 3",
+    "zh_name": "钻石 3",
+    "rank": "diamond",
+    "division": 3,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "diamond_2": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/diamond2.png",
+    "file": "diamond_2.png",
+    "name": "Diamond 2",
+    "zh_name": "钻石 2",
+    "rank": "diamond",
+    "division": 2,
+    "size": [
+      256,
+      256
+    ]
+  },
+  "diamond_1": {
+    "source": "https://api.mozambiquehe.re/assets/ranks/diamond1.png",
+    "file": "diamond_1.png",
+    "name": "Diamond 1",
+    "zh_name": "钻石 1",
+    "rank": "diamond",
+    "division": 1,
     "size": [
       256,
       256
@@ -54,6 +352,8 @@
     "file": "diamond.png",
     "name": "Diamond",
     "zh_name": "钻石",
+    "rank": "diamond",
+    "division": null,
     "size": [
       256,
       256
@@ -64,19 +364,31 @@
     "file": "master.png",
     "name": "Master",
     "zh_name": "大师",
+    "rank": "master",
+    "division": null,
     "size": [
       256,
       256
     ]
   },
   "predator": {
-    "source": "https://apexlegends.wiki.gg/images/Apex_Predators.svg?909755",
+    "source": "https://apexlegends.wiki.gg/wiki/Special:Redirect/file/Ranked_Tier7_Apex_Predator.png",
     "file": "predator.png",
     "name": "Apex Predator",
     "zh_name": "猎杀",
+    "rank": "predator",
+    "division": null,
     "size": [
       256,
       256
     ]
+  },
+  "predator_svg_legacy": {
+    "source": "legacy local SVG asset",
+    "file": "Apex_Predators.svg",
+    "name": "Apex Predator SVG",
+    "zh_name": "猎杀 SVG",
+    "rank": "predator",
+    "division": null
   }
 }

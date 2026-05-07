@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -129,6 +130,10 @@ class Main(Star):
     _SEASON_IMAGE_CACHE_TTL_SECONDS = 60
     _RANK_CHANGE_CARD_SIZE = (1122, 1402)
     _PLAYER_RANK_CARD_SIZE = (1122, 1402)
+    _HELP_CARD_SIZE = (1122, 2380)
+    _MONITOR_ADDED_CARD_SIZE = (1122, 1040)
+    _MONITOR_LIST_CARD_WIDTH = 1122
+    _MONITOR_LIST_ROW_LIMIT = 8
     _PREDATOR_IMAGE_CACHE_TTL_SECONDS = 60
     _PREDATOR_GREEN = (88, 210, 126, 255)
     _PREDATOR_DEEP_RED = (158, 31, 36, 255)
@@ -810,55 +815,13 @@ class Main(Star):
             yield self._plain(event, "\n".join([self._time_line(), deny]))
             return
 
-        lines = [
-            self._time_line(),
-            "📋 Apex Rank Watch 帮助（/apexhelp 或 /apex帮助）",
-            "——",
-            "【查询】",
-            "/apexrank <玩家|uid:...> [平台]  别名：/apex查询 /视奸",
-            "例：/apexrank PlayerName pc",
-            "——",
-            "【监控（群聊）】",
-            "/apexrankwatch <玩家|uid:...> [平台]  别名：/apex监控 /持续视奸",
-            "/apexranklist  别名：/apex列表",
-            "/apexrankremove <玩家|uid:...> [平台]  别名：/apex移除 /取消持续视奸",
-            "——",
-            "【信息】",
-            "/apexseason [赛季号]  别名：/apex赛季 /新赛季",
-            "/map  别名：/地图 /排位地图 /apexmap /apexrankmap（排位地图轮换）",
-            "/匹配地图（三人赛地图轮换）",
-            "/apexpredator [平台]  别名：/apex猎杀 /猎杀",
-            "例：/apexseason 28  或  /apexseason current",
-            "关键词：消息包含「赛季」自动回复（/赛季关闭，/赛季开启）",
-            "——",
-            "【管理】",
-            "/apexblacklist <add|remove|list|clear> <玩家ID>  别名：/apex黑名单 /不准视奸 /apexban",
-            "——",
-            "【参数】",
-            "平台：PC / PS4 / X1 / SWITCH（默认 PC；PC 无数据自动尝试其他平台）",
-            "UUID：使用 uid: 或 uuid: 前缀（例：/apexrank uid:000000）",
-            "——",
-            f"⏱️ 监控间隔：{self._config.check_interval} 分钟",
-            f"🔻 最小有效分：{self._config.min_valid_score} 分",
-            "⚠️ 异常分数：仅当高分(>1000)掉到接近0分(<10)时判定为异常",
-            "🛡️ 权限：群白名单、QQ 黑名单、主人 QQ、私聊开关",
-        ]
-
-        config_blacklist = self._get_config_blacklist()
-        runtime_blacklist = self._runtime_blacklist
-        total_blacklist = len(config_blacklist) + len(runtime_blacklist)
-        if total_blacklist:
-            lines.append(
-                "⛔ 黑名单说明：配置黑名单 "
-                f"{len(config_blacklist)} 个，动态黑名单 {len(runtime_blacklist)} 个"
-            )
-            lines.append("⛔ 黑名单ID无法被查询或监控")
-
-        if self._config.query_blocklist:
-            count = len(_split_csv(self._config.query_blocklist))
-            lines.append(f"⛔ 禁止查询玩家：已设置 {count} 个玩家ID")
-
-        yield self._plain(event, "\n".join(lines))
+        lines = self._build_apex_help_lines()
+        try:
+            image_path = self._render_apex_help_image()
+            yield self._image(event, image_path)
+        except Exception as exc:
+            logger.error(f"帮助图片生成失败，已回退文字输出: {exc}")
+            yield self._plain(event, "\n".join(lines))
 
     @filter.command("apexrank")
     async def apexrank(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
@@ -1282,16 +1245,21 @@ class Main(Star):
             event.unified_msg_origin, f"✅ 测试消息: 已添加对 {player_data.name} 的排名监控"
         )
 
-        yield self._plain(event, 
-            "\n".join(
-                [
-                    self._time_line(),
-                    f"✅ 成功添加对 {player_data.name} 的排名监控",
-                    f"🖥️ 平台: {self._format_platform(normalized_platform)}",
-                    f"🏆 当前排名: {self._get_rank_display_text(player_data)}",
-                ]
-            )
+        player_data.platform = normalized_platform
+        success_text = "\n".join(
+            [
+                self._time_line(),
+                f"✅ 成功添加对 {player_data.name} 的排名监控",
+                f"🖥️ 平台: {self._format_platform(normalized_platform)}",
+                f"🏆 当前排名: {self._get_rank_display_text(player_data)}",
+            ]
         )
+        try:
+            image_path = self._render_monitor_added_image(player_data, normalized_platform)
+            yield self._image(event, image_path)
+        except Exception as exc:
+            logger.error(f"监控添加确认图片生成失败，已回退文字输出: {exc}")
+            yield self._plain(event, success_text)
 
     @filter.command("apexranklist")
     async def apexranklist(self, event: AstrMessageEvent):
@@ -1317,36 +1285,13 @@ class Main(Star):
             )
             return
 
-        response_lines = [self._time_line(), "📋 本群 Apex 排名监控列表"]
-        for index, player in enumerate(group.players.values(), start=1):
-            rank_display = (
-                f"{player.rank_name} {player.rank_div}"
-                if player.rank_div
-                else player.rank_name
-            )
-            platform = getattr(player, "platform", "PC") or "PC"
-            response_lines.append(f"👤 玩家 {index}: {player.player_name}")
-            response_lines.append(f"🖥️ 平台: {self._format_platform(platform)}")
-            response_lines.append(f"🏆 段位: {rank_display}")
-            response_lines.append(f"🔢 分数: {player.rank_score}")
-            if player.global_rank_percent and player.global_rank_percent != "未知":
-                response_lines.append(f"🌎 全球排名: {player.global_rank_percent}%")
-            if player.selected_legend:
-                response_lines.append(f"🎮 当前英雄: {player.selected_legend}")
-                if player.legend_kills_percent:
-                    response_lines.append(
-                        f"📊 击杀排名: 全球 {player.legend_kills_percent}%"
-                    )
-            response_lines.append("➖ —")
-
-        response_lines.append(f"🔢 总计: {len(group.players)} 个玩家")
-        response_lines.append(f"⏱️ 检测间隔: {self._config.check_interval} 分钟")
-        response_lines.append(
-            "⚠️ 分数异常判断: 仅当高分(>1000)掉到接近0分(<10)时判定为异常"
-        )
-        response_lines.append(f"🔻 最小有效分数: {self._config.min_valid_score} 分")
-
-        yield self._plain(event, "\n".join(response_lines))
+        response_lines = self._build_rank_watch_list_lines(group.players.values())
+        try:
+            image_path = self._render_rank_watch_list_image(group.players.values())
+            yield self._image(event, image_path)
+        except Exception as exc:
+            logger.error(f"群监控列表图片生成失败，已回退文字输出: {exc}")
+            yield self._plain(event, "\n".join(response_lines))
 
     @filter.command("apexrankremove")
     async def apexrankremove(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
@@ -1878,6 +1823,649 @@ class Main(Star):
 
         return "\n".join(lines)
 
+    def _build_apex_help_lines(self) -> list[str]:
+        lines = [
+            self._time_line(),
+            "📋 Apex Rank Watch 帮助（/apexhelp 或 /apex帮助）",
+            "——",
+            "【查询】",
+            "/apexrank <玩家|uid:...> [平台]  别名：/apex查询 /视奸",
+            "例：/apexrank PlayerName pc",
+            "——",
+            "【监控（群聊）】",
+            "/apexrankwatch <玩家|uid:...> [平台]  别名：/apex监控 /持续视奸",
+            "/apexranklist  别名：/apex列表",
+            "/apexrankremove <玩家|uid:...> [平台]  别名：/apex移除 /取消持续视奸",
+            "——",
+            "【信息】",
+            "/apexseason [赛季号]  别名：/apex赛季 /新赛季",
+            "/map  别名：/地图 /排位地图 /apexmap /apexrankmap（排位地图轮换）",
+            "/匹配地图（三人赛地图轮换）",
+            "/apexpredator [平台]  别名：/apex猎杀 /猎杀",
+            "例：/apexseason 28  或  /apexseason current",
+            "关键词：消息包含「赛季」自动回复（/赛季关闭，/赛季开启）",
+            "——",
+            "【管理】",
+            "/apexblacklist <add|remove|list|clear> <玩家ID>  别名：/apex黑名单 /不准视奸 /apexban",
+            "——",
+            "【参数】",
+            "平台：PC / PS4 / X1 / SWITCH（默认 PC；PC 无数据自动尝试其他平台）",
+            "UUID：使用 uid: 或 uuid: 前缀（例：/apexrank uid:000000）",
+            "——",
+            f"⏱️ 监控间隔：{getattr(self._config, 'check_interval', 2)} 分钟",
+            f"🔻 最小有效分：{getattr(self._config, 'min_valid_score', 1)} 分",
+            "⚠️ 异常分数：仅当高分(>1000)掉到接近0分(<10)时判定为异常",
+            "🛡️ 权限：群白名单、QQ 黑名单、主人 QQ、私聊开关",
+        ]
+
+        try:
+            config_blacklist = self._get_config_blacklist()
+        except Exception:
+            config_blacklist = set()
+        runtime_blacklist = getattr(self, "_runtime_blacklist", set())
+        total_blacklist = len(config_blacklist) + len(runtime_blacklist)
+        if total_blacklist:
+            lines.append(
+                "⛔ 黑名单说明：配置黑名单 "
+                f"{len(config_blacklist)} 个，动态黑名单 {len(runtime_blacklist)} 个"
+            )
+            lines.append("⛔ 黑名单ID无法被查询或监控")
+
+        query_blocklist = getattr(self._config, "query_blocklist", "")
+        if query_blocklist:
+            count = len(_split_csv(query_blocklist))
+            lines.append(f"⛔ 禁止查询玩家：已设置 {count} 个玩家ID")
+        return lines
+
+    def _render_apex_help_image(self) -> Path:
+        if Image is None:
+            raise RuntimeError("缺少 Pillow，无法生成帮助图片")
+
+        output_dir = self._generated_card_output_dir("help_cards")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        image = self._build_apex_help_card()
+        output_path = output_dir / f"apex_help_{now_epoch_ms()}.png"
+        image.save(output_path, format="PNG", optimize=True)
+        self._cleanup_generated_images(output_dir, "apex_help_*.png", keep=8)
+        return output_path
+
+    def _build_apex_help_card(self):
+        width, height = self._HELP_CARD_SIZE
+        canvas = Image.new("RGBA", (width, height), (7, 8, 11, 255))
+        draw = ImageDraw.Draw(canvas)
+        self._draw_rank_change_background(canvas)
+        self._draw_rank_change_outer_frame(draw, width, height)
+        self._draw_help_card_header(canvas, draw)
+
+        for box, title, rows in self._help_card_sections():
+            self._draw_help_section(draw, box, title, rows)
+        return canvas.convert("RGB")
+
+    def _help_card_sections(self) -> list[tuple[tuple[int, int, int, int], str, list[tuple[str, str]]]]:
+        return [
+            (
+                (54, 250, 1068, 500),
+                "查询",
+                [
+                    ("/apexrank 玩家 [平台]", "查询玩家段位、分数、在线状态"),
+                    ("/apex查询 /视奸", "中文别名，默认 PC，支持 uid:"),
+                ],
+            ),
+            (
+                (54, 520, 1068, 900),
+                "监控",
+                [
+                    ("/apexrankwatch 玩家 [平台]", "添加群内持续监控"),
+                    ("/apexranklist /apex列表", "查看本群监控列表"),
+                    ("/apexrankremove 玩家 [平台] /取消持续视奸", "移除指定玩家监控"),
+                    ("/apex监控 /持续视奸", "添加监控中文别名"),
+                ],
+            ),
+            (
+                (54, 920, 1068, 1370),
+                "信息",
+                [
+                    ("/map /地图 /排位地图", "排位地图轮换，默认输出图片"),
+                    ("/匹配地图", "三人赛地图轮换"),
+                    ("/apexpredator [平台] /apex猎杀 /猎杀", "大师数量与猎杀底分"),
+                    ("/apexseason /新赛季", "当前赛季结束时间"),
+                    ("赛季关键词", "群消息包含赛季时自动回复"),
+                ],
+            ),
+            (
+                (54, 1390, 1068, 1680),
+                "管理",
+                [
+                    ("/apexblacklist add 玩家ID", "加入动态黑名单"),
+                    ("/apexblacklist list", "查看配置与动态黑名单"),
+                    ("/赛季关闭 /赛季开启", "管理本群赛季关键词回复"),
+                ],
+            ),
+            (
+                (54, 1700, 1068, 2296),
+                "参数",
+                self._help_parameter_rows(),
+            ),
+        ]
+
+    def _help_parameter_rows(self) -> list[tuple[str, str]]:
+        try:
+            config_blacklist = self._get_config_blacklist()
+        except Exception:
+            config_blacklist = set()
+        runtime_blacklist = getattr(self, "_runtime_blacklist", set())
+        query_blocklist = getattr(self._config, "query_blocklist", "")
+        rows = [
+            ("平台", "PC / PS4 / X1 / SWITCH；PC 无数据会自动尝试其他平台"),
+            ("UID", "使用 uid: 或 uuid: 前缀，例如 /apexrank uid:000000"),
+            ("监控间隔", f"{getattr(self._config, 'check_interval', 2)} 分钟"),
+            ("最小有效分", f"{getattr(self._config, 'min_valid_score', 1)} 分"),
+            ("异常分数", "仅当高分掉到接近 0 分时判定为异常"),
+            ("权限", "支持群白名单、QQ 黑名单、主人 QQ、私聊开关"),
+        ]
+        if config_blacklist or runtime_blacklist:
+            rows.append(("黑名单", f"配置 {len(config_blacklist)} 个，动态 {len(runtime_blacklist)} 个"))
+        if query_blocklist:
+            rows.append(("禁止查询", f"已设置 {len(_split_csv(query_blocklist))} 个玩家ID"))
+        return rows
+
+    def _draw_help_card_header(self, canvas, draw) -> None:
+        box = (54, 54, 1068, 224)
+        self._draw_rank_panel_base(draw, box, fill=(12, 14, 19, 238), outline_alpha=150)
+        badge = self._apex_logo_badge(118)
+        canvas.alpha_composite(badge, (92, 80))
+
+        title = "Apex Rank Watch"
+        subtitle = "QQ 命令帮助卡 · 图片化速查"
+        title_font = self._fit_font(draw, title, 68, 48, 690, bold=True)
+        subtitle_font = self._fit_font(draw, subtitle, 32, 24, 690, bold=True)
+        self._draw_text_stroked(
+            draw,
+            (250, self._centered_text_y(draw, title, title_font, 70, 150)),
+            title,
+            title_font,
+            fill=(248, 248, 244, 255),
+            stroke_width=2,
+        )
+        self._draw_text_stroked(
+            draw,
+            (254, self._centered_text_y(draw, subtitle, subtitle_font, 150, 202)),
+            subtitle,
+            subtitle_font,
+            fill=(205, 212, 222, 255),
+        )
+        draw.rectangle((780, 214, 928, 220), fill=(236, 48, 52, 220))
+
+    def _draw_help_section(
+        self,
+        draw,
+        box: tuple[int, int, int, int],
+        title: str,
+        rows: list[tuple[str, str]],
+    ) -> None:
+        self._draw_rank_panel_base(draw, box, fill=(13, 16, 21, 238), outline_alpha=110)
+        title_font = self._font(38, bold=True)
+        self._draw_text_stroked(
+            draw,
+            (box[0] + 34, box[1] + 24),
+            title,
+            title_font,
+            fill=(246, 246, 241, 255),
+            stroke_width=2,
+        )
+        draw.rectangle((box[0] + 34, box[1] + 74, box[0] + 142, box[1] + 80), fill=(232, 48, 52, 230))
+
+        row_top = box[1] + 92
+        available = max(1, box[3] - row_top - 22)
+        row_height = max(66, available // max(1, len(rows)))
+        for index, (command, desc) in enumerate(rows):
+            top = row_top + index * row_height
+            if top + 56 > box[3] - 16:
+                break
+            dot_y = top + 18
+            draw.rounded_rectangle((box[0] + 34, dot_y - 6, box[0] + 46, dot_y + 6), radius=3, fill=(232, 48, 52, 235))
+            command_font = self._fit_font(draw, command, 29, 21, box[2] - box[0] - 102, bold=True)
+            desc_font = self._fit_font(draw, desc, 23, 17, box[2] - box[0] - 102)
+            self._draw_text_stroked(
+                draw,
+                (box[0] + 60, top),
+                command,
+                command_font,
+                fill=(250, 250, 246, 255),
+            )
+            self._draw_text_stroked(
+                draw,
+                (box[0] + 60, top + 34),
+                desc,
+                desc_font,
+                fill=(172, 181, 194, 255),
+            )
+
+    def _build_rank_watch_list_lines(self, players_iter) -> list[str]:
+        players = list(players_iter)
+        response_lines = [self._time_line(), "📋 本群 Apex 排名监控列表"]
+        for index, player in enumerate(players, start=1):
+            rank_display = self._record_rank_display(player)
+            platform = getattr(player, "platform", "PC") or "PC"
+            response_lines.append(f"👤 玩家 {index}: {player.player_name}")
+            response_lines.append(f"🖥️ 平台: {self._format_platform(platform)}")
+            response_lines.append(f"🏆 段位: {rank_display}")
+            response_lines.append(f"🔢 分数: {player.rank_score}")
+            if player.global_rank_percent and player.global_rank_percent != "未知":
+                response_lines.append(f"🌎 全球排名: {self._format_rank_percent(player.global_rank_percent)}")
+            if player.selected_legend:
+                response_lines.append(f"🎮 当前英雄: {player.selected_legend}")
+                if player.legend_kills_percent:
+                    response_lines.append(
+                        f"📊 击杀排名: 全球 {self._format_rank_percent(player.legend_kills_percent)}"
+                    )
+            response_lines.append("➖ —")
+
+        response_lines.append(f"🔢 总计: {len(players)} 个玩家")
+        response_lines.append(f"⏱️ 检测间隔: {getattr(self._config, 'check_interval', 2)} 分钟")
+        response_lines.append(
+            "⚠️ 分数异常判断: 仅当高分(>1000)掉到接近0分(<10)时判定为异常"
+        )
+        response_lines.append(f"🔻 最小有效分数: {getattr(self._config, 'min_valid_score', 1)} 分")
+        return response_lines
+
+    def _render_rank_watch_list_image(self, players_iter) -> Path:
+        if Image is None:
+            raise RuntimeError("缺少 Pillow，无法生成群监控列表图片")
+
+        players = list(players_iter)
+        output_dir = self._generated_card_output_dir("rank_watch_list_cards")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        image = self._build_rank_watch_list_card(players)
+        output_path = output_dir / f"rank_watch_list_{now_epoch_ms()}.png"
+        image.save(output_path, format="PNG", optimize=True)
+        self._cleanup_generated_images(output_dir, "rank_watch_list_*.png", keep=10)
+        return output_path
+
+    def _build_rank_watch_list_card(self, players: list[PlayerRecord]):
+        width = self._MONITOR_LIST_CARD_WIDTH
+        shown_players = players[: self._MONITOR_LIST_ROW_LIMIT]
+        row_height = 118
+        row_gap = 14
+        footer_height = 92
+        list_top = 366
+        height = max(
+            760,
+            list_top + len(shown_players) * (row_height + row_gap) + footer_height,
+        )
+        canvas = Image.new("RGBA", (width, height), (7, 8, 11, 255))
+        draw = ImageDraw.Draw(canvas)
+        self._draw_rank_change_background(canvas)
+        self._draw_rank_change_outer_frame(draw, width, height)
+        self._draw_monitor_list_header(canvas, draw, len(players))
+        self._draw_monitor_list_summary(draw, len(players))
+
+        y = list_top
+        for index, player in enumerate(shown_players, start=1):
+            self._draw_monitor_list_row(draw, (54, y, width - 54, y + row_height), index, player)
+            y += row_height + row_gap
+
+        footer_text = "时间均为北京时间"
+        if len(players) > len(shown_players):
+            footer_text = f"已展示前 {len(shown_players)} 位，还有 {len(players) - len(shown_players)} 位玩家未展示"
+        footer_font = self._fit_font(draw, footer_text, 28, 20, width - 150, bold=True)
+        self._draw_centered_stroked_text(
+            draw,
+            footer_text,
+            footer_font,
+            54,
+            width - 54,
+            height - 84,
+            height - 40,
+            (202, 210, 220, 255),
+        )
+        return canvas.convert("RGB")
+
+    def _draw_monitor_list_header(self, canvas, draw, total_players: int) -> None:
+        box = (54, 54, 1068, 224)
+        self._draw_rank_panel_base(draw, box, fill=(12, 14, 19, 238), outline_alpha=150)
+        badge = self._apex_logo_badge(118)
+        canvas.alpha_composite(badge, (92, 80))
+
+        title = "Apex 群监控列表"
+        subtitle = f"{total_players} 位玩家 · 每 {getattr(self._config, 'check_interval', 2)} 分钟检测一次"
+        title_font = self._fit_font(draw, title, 66, 46, 690, bold=True)
+        subtitle_font = self._fit_font(draw, subtitle, 32, 23, 690, bold=True)
+        self._draw_text_stroked(
+            draw,
+            (250, self._centered_text_y(draw, title, title_font, 70, 150)),
+            title,
+            title_font,
+            fill=(248, 248, 244, 255),
+            stroke_width=2,
+        )
+        self._draw_text_stroked(
+            draw,
+            (254, self._centered_text_y(draw, subtitle, subtitle_font, 150, 202)),
+            subtitle,
+            subtitle_font,
+            fill=(205, 212, 222, 255),
+        )
+        draw.rectangle((760, 214, 930, 220), fill=(236, 48, 52, 220))
+
+    def _draw_monitor_list_summary(self, draw, total_players: int) -> None:
+        panels = [
+            ((54, 244, 370, 338), "监控玩家", f"{total_players} 位"),
+            ((388, 244, 734, 338), "检测间隔", f"{getattr(self._config, 'check_interval', 2)} 分钟"),
+            ((752, 244, 1068, 338), "最小有效分", f"{getattr(self._config, 'min_valid_score', 1)} 分"),
+        ]
+        for box, label, value in panels:
+            self._draw_mini_info_pill(draw, box, label, value)
+
+    def _draw_monitor_list_row(
+        self,
+        draw,
+        box: tuple[int, int, int, int],
+        index: int,
+        player: PlayerRecord,
+    ) -> None:
+        self._draw_rank_panel_base(draw, box, fill=(13, 16, 21, 240), outline_alpha=92)
+        rank_name = getattr(player, "rank_name", "") or "未知"
+        rank_div = getattr(player, "rank_div", 0) or 0
+        rank_icon = self._resolve_rank_icon_path(rank_name, rank_div)
+        icon_box = (box[0] + 24, box[1] + 16, box[0] + 112, box[1] + 104)
+        if rank_icon.exists():
+            self._draw_image_asset(draw, rank_icon, icon_box)
+            if rank_div and "_" not in rank_icon.stem and rank_icon.stem not in {"master", "predator"}:
+                div_font = self._font(28, bold=True)
+                self._draw_centered_stroked_text(
+                    draw,
+                    str(rank_div),
+                    div_font,
+                    icon_box[0] + 26,
+                    icon_box[2] - 26,
+                    icon_box[1] + 40,
+                    icon_box[3] - 18,
+                    (255, 255, 255, 255),
+                    stroke_width=2,
+                )
+        else:
+            self._draw_icon_octagon(draw, icon_box)
+            self._draw_rank_icon(draw, "target", icon_box)
+
+        name = str(getattr(player, "player_name", "") or "未知玩家")
+        platform = self._format_platform(getattr(player, "platform", "PC") or "PC")
+        checked_at = self._format_record_checked_at(getattr(player, "last_checked", 0))
+        rank_text = self._record_rank_display(player)
+        name_text = f"{index}. {name}"
+        meta_text = f"{platform} · {checked_at} · {rank_text}"
+        name_font = self._fit_font(draw, name_text, 34, 24, 390, bold=True)
+        meta_font = self._fit_font(draw, meta_text, 25, 18, 430)
+        text_left = box[0] + 132
+        self._draw_text_stroked(draw, (text_left, box[1] + 18), name_text, name_font, fill=(250, 250, 246, 255))
+        self._draw_text_stroked(draw, (text_left, box[1] + 64), meta_text, meta_font, fill=(190, 198, 210, 255))
+
+        legend_name = str(getattr(player, "selected_legend", "") or "未知")
+        legend_icon = self._resolve_legend_icon_path(legend_name)
+        legend_box = (box[0] + 600, box[1] + 22, box[0] + 674, box[1] + 96)
+        self._draw_icon_octagon(draw, legend_box)
+        if legend_icon.exists():
+            self._draw_image_asset(draw, legend_icon, legend_box, clip_octagon=True)
+        else:
+            self._draw_rank_icon(draw, "legend", legend_box)
+        legend_font = self._fit_font(draw, legend_name, 26, 18, 140, bold=True)
+        self._draw_centered_stroked_text(
+            draw,
+            legend_name,
+            legend_font,
+            box[0] + 682,
+            box[0] + 830,
+            box[1] + 34,
+            box[1] + 86,
+            (236, 240, 246, 255),
+        )
+
+        score_text = self._format_rank_score_number(getattr(player, "rank_score", 0))
+        score_font = self._fit_font(draw, score_text, 46, 30, 190, bold=True)
+        label_font = self._font(22, bold=True)
+        score_left = box[2] - 222
+        self._draw_centered_stroked_text(
+            draw,
+            "当前分数",
+            label_font,
+            score_left,
+            box[2] - 28,
+            box[1] + 18,
+            box[1] + 48,
+            (176, 184, 196, 255),
+        )
+        self._draw_centered_stroked_text(
+            draw,
+            score_text,
+            score_font,
+            score_left,
+            box[2] - 28,
+            box[1] + 48,
+            box[1] + 104,
+            (250, 250, 246, 255),
+            stroke_width=2,
+        )
+        draw.rectangle((score_left + 28, box[3] - 18, box[2] - 58, box[3] - 12), fill=(221, 48, 52, 185))
+
+    def _render_monitor_added_image(self, player_data: ApexPlayerStats, platform: str) -> Path:
+        if Image is None:
+            raise RuntimeError("缺少 Pillow，无法生成监控添加确认图片")
+
+        output_dir = self._generated_card_output_dir("monitor_added_cards")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        image = self._build_monitor_added_card(player_data, platform)
+        output_path = output_dir / f"monitor_added_{now_epoch_ms()}.png"
+        image.save(output_path, format="PNG", optimize=True)
+        self._cleanup_generated_images(output_dir, "monitor_added_*.png", keep=12)
+        return output_path
+
+    def _build_monitor_added_card(self, player_data: ApexPlayerStats, platform: str):
+        width, height = self._MONITOR_ADDED_CARD_SIZE
+        canvas = Image.new("RGBA", (width, height), (7, 8, 11, 255))
+        draw = ImageDraw.Draw(canvas)
+        self._draw_rank_change_background(canvas)
+        self._draw_rank_change_outer_frame(draw, width, height)
+        self._draw_monitor_added_header(canvas, draw)
+        self._draw_monitor_added_status(draw)
+
+        rank_display = (
+            f"{player_data.rank_name} {player_data.rank_div}"
+            if player_data.rank_div
+            else player_data.rank_name or "未知"
+        )
+        self._draw_player_profile_panel(draw, (54, 482, 518, 792), player_data)
+        self._draw_rank_badge_panel(
+            draw,
+            (536, 482, 1070, 792),
+            "当前段位",
+            rank_display,
+            player_data.rank_name,
+            player_data.rank_div,
+            secondary_value=f"{self._format_rank_score_number(player_data.rank_score)} 分",
+        )
+        self._draw_mini_info_pill(draw, (54, 820, 370, 920), "平台", self._format_platform(platform))
+        self._draw_monitor_added_legend_pill(
+            draw,
+            (388, 820, 734, 920),
+            player_data.selected_legend or "未知",
+        )
+        self._draw_mini_info_pill(draw, (752, 820, 1068, 920), "检测间隔", f"{getattr(self._config, 'check_interval', 2)} 分钟")
+        return canvas.convert("RGB")
+
+    def _draw_monitor_added_header(self, canvas, draw) -> None:
+        box = (54, 54, 1068, 224)
+        self._draw_rank_panel_base(draw, box, fill=(12, 14, 19, 238), outline_alpha=150)
+        badge = self._apex_logo_badge(118)
+        canvas.alpha_composite(badge, (92, 80))
+        title = "Apex 监控已添加"
+        subtitle = "当排位分数变化时会自动推送图片通知"
+        title_font = self._fit_font(draw, title, 66, 46, 690, bold=True)
+        subtitle_font = self._fit_font(draw, subtitle, 32, 22, 690, bold=True)
+        self._draw_text_stroked(
+            draw,
+            (250, self._centered_text_y(draw, title, title_font, 70, 150)),
+            title,
+            title_font,
+            fill=(248, 248, 244, 255),
+            stroke_width=2,
+        )
+        self._draw_text_stroked(
+            draw,
+            (254, self._centered_text_y(draw, subtitle, subtitle_font, 150, 202)),
+            subtitle,
+            subtitle_font,
+            fill=(205, 212, 222, 255),
+        )
+        draw.rectangle((790, 214, 938, 220), fill=(236, 48, 52, 220))
+
+    def _draw_monitor_added_status(self, draw) -> None:
+        time_box = (54, 244, 1068, 338)
+        self._draw_rank_panel_base(draw, time_box, fill=(14, 17, 23, 240), outline_alpha=120)
+        self._draw_clock_icon(draw, (92, 265), 28)
+        label_font = self._font(32, bold=True)
+        value = self._now_str()
+        value_font = self._fit_font(draw, value, 34, 24, 560, bold=True)
+        self._draw_text_stroked(
+            draw,
+            (176, self._centered_text_y(draw, "时间:", label_font, time_box[1], time_box[3])),
+            "时间:",
+            label_font,
+            fill=(226, 226, 220, 255),
+        )
+        self._draw_text_stroked(
+            draw,
+            (286, self._centered_text_y(draw, value, value_font, time_box[1], time_box[3])),
+            value,
+            value_font,
+            fill=(244, 244, 239, 255),
+        )
+
+        status_box = (54, 358, 1068, 460)
+        self._draw_rank_panel_base(draw, status_box, fill=(36, 16, 18, 242), outline_alpha=150)
+        status = "已加入本群排位监控"
+        status_font = self._fit_font(draw, status, 46, 30, 740, bold=True)
+        self._draw_centered_stroked_text(
+            draw,
+            status,
+            status_font,
+            status_box[0],
+            status_box[2],
+            status_box[1],
+            status_box[3],
+            (255, 246, 236, 255),
+            stroke_width=2,
+        )
+
+    def _draw_mini_info_pill(
+        self,
+        draw,
+        box: tuple[int, int, int, int],
+        label: str,
+        value: str,
+    ) -> None:
+        self._draw_rank_panel_base(draw, box, fill=(13, 16, 21, 238), outline_alpha=92)
+        label_font = self._fit_font(draw, label, 24, 18, box[2] - box[0] - 34, bold=True)
+        value_font = self._fit_font(draw, str(value), 30, 21, box[2] - box[0] - 34, bold=True)
+        self._draw_centered_stroked_text(
+            draw,
+            label,
+            label_font,
+            box[0] + 12,
+            box[2] - 12,
+            box[1] + 12,
+            box[1] + 38,
+            (172, 181, 194, 255),
+        )
+        self._draw_centered_stroked_text(
+            draw,
+            str(value),
+            value_font,
+            box[0] + 12,
+            box[2] - 12,
+            box[1] + 38,
+            box[3] - 10,
+            (250, 250, 246, 255),
+            stroke_width=2,
+        )
+
+    def _draw_monitor_added_legend_pill(
+        self,
+        draw,
+        box: tuple[int, int, int, int],
+        legend_name: str,
+    ) -> None:
+        self._draw_rank_panel_base(draw, box, fill=(13, 16, 21, 238), outline_alpha=92)
+        icon_box = (box[0] + 22, box[1] + 14, box[0] + 100, box[1] + 92)
+        self._draw_icon_octagon(draw, icon_box)
+        legend_icon = self._resolve_legend_icon_path(legend_name)
+        if legend_icon.exists():
+            self._draw_image_asset(draw, legend_icon, icon_box, clip_octagon=True)
+        else:
+            self._draw_rank_icon(draw, "legend", icon_box)
+
+        label_font = self._fit_font(draw, "当前英雄", 23, 18, box[2] - box[0] - 134, bold=True)
+        value_font = self._fit_font(draw, legend_name, 30, 21, box[2] - box[0] - 134, bold=True)
+        text_left = box[0] + 116
+        text_right = box[2] - 18
+        self._draw_centered_stroked_text(
+            draw,
+            "当前英雄",
+            label_font,
+            text_left,
+            text_right,
+            box[1] + 16,
+            box[1] + 42,
+            (172, 181, 194, 255),
+        )
+        self._draw_centered_stroked_text(
+            draw,
+            legend_name,
+            value_font,
+            text_left,
+            text_right,
+            box[1] + 44,
+            box[3] - 12,
+            (250, 250, 246, 255),
+            stroke_width=2,
+        )
+
+    def _generated_card_output_dir(self, name: str) -> Path:
+        data_dir = getattr(self, "_data_dir", None)
+        if data_dir is None:
+            return self._PLUGIN_ROOT / "_generated" / name
+        return Path(data_dir) / name
+
+    def _cleanup_generated_images(self, output_dir: Path, pattern: str, keep: int) -> None:
+        try:
+            files = sorted(
+                output_dir.glob(pattern),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+            for file in files[keep:]:
+                file.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug(f"清理生成图片缓存失败: {exc}")
+
+    @staticmethod
+    def _record_rank_display(player: PlayerRecord) -> str:
+        rank_name = str(getattr(player, "rank_name", "") or "未知")
+        rank_div = getattr(player, "rank_div", 0) or 0
+        if rank_div:
+            return f"{rank_name} {rank_div}"
+        return rank_name
+
+    def _format_record_checked_at(self, value: int) -> str:
+        try:
+            raw = int(value)
+            if raw <= 0:
+                return "未知时间"
+            seconds = raw / 1000 if raw > 10_000_000_000 else raw
+            dt = datetime.fromtimestamp(seconds, tz=timezone.utc).astimezone(SHANGHAI_TZ)
+            return dt.strftime("%m-%d %H:%M")
+        except Exception:
+            return "未知时间"
+
     def _render_player_rank_image(self, player_data: ApexPlayerStats) -> Path:
         if Image is None:
             raise RuntimeError("缺少 Pillow，无法生成玩家段位信息图片")
@@ -2368,14 +2956,14 @@ class Main(Star):
     ) -> None:
         self._draw_rank_panel_base(draw, box, fill=(13, 16, 21, 240), outline_alpha=105)
         center_x = (box[0] + box[2]) // 2
-        rank_icon = self._resolve_rank_icon_path(rank_name)
+        rank_icon = self._resolve_rank_icon_path(rank_name, rank_div)
         if rank_icon.exists():
             self._draw_image_asset(
                 draw,
                 rank_icon,
                 (center_x - 92, box[1] + 24, center_x + 92, box[1] + 178),
             )
-            if rank_div and rank_icon.stem not in {"master", "predator"}:
+            if rank_div and "_" not in rank_icon.stem and rank_icon.stem not in {"master", "predator"}:
                 badge_font = self._font(42, bold=True)
                 self._draw_centered_stroked_text(
                     draw,
@@ -2609,6 +3197,10 @@ class Main(Star):
             logger.debug(f"读取图片资源失败 {path}: {exc}")
             return
 
+        alpha_box = image.getchannel("A").getbbox()
+        if alpha_box:
+            image = image.crop(alpha_box)
+
         width = max(1, box[2] - box[0])
         height = max(1, box[3] - box[1])
         resampling = getattr(Image, "Resampling", Image).LANCZOS
@@ -2651,7 +3243,7 @@ class Main(Star):
         except Exception as exc:
             logger.debug(f"绘制图片资源失败 {path}: {exc}")
 
-    def _resolve_rank_icon_path(self, rank_name: str) -> Path:
+    def _resolve_rank_icon_path(self, rank_name: str, rank_div: int = 0) -> Path:
         normalized = self._normalize_asset_token(rank_name)
         aliases = {
             "rookie": "rookie",
@@ -2681,6 +3273,15 @@ class Main(Star):
             key = "predator"
         if key is None:
             key = normalized
+        if key in {"rookie", "bronze", "silver", "gold", "platinum", "diamond"}:
+            try:
+                division = int(rank_div)
+            except Exception:
+                division = 0
+            if division in {1, 2, 3, 4}:
+                division_path = self._RANK_ICON_DIR / f"{key}_{division}.png"
+                if division_path.exists():
+                    return division_path
         return self._RANK_ICON_DIR / f"{key}.png"
 
     def _resolve_legend_icon_path(self, legend_name: str) -> Path:
@@ -3018,8 +3619,10 @@ class Main(Star):
         title_font = self._fit_font(draw, season_label, 62, 38, width - 330, bold=True)
         label_font = self._font(25, bold=True)
         value_font = self._fit_font(draw, end_time, 46, 30, width - 405, bold=True)
-        small_font = self._font(22)
+        small_font = self._fit_font(draw, f"剩余 {remaining}", 22, 16, 250, bold=False)
         source_font = self._font(18)
+        source_text = self._season_source_label(season_info.source)
+        source_font = self._fit_font(draw, source_text, 18, 14, 250, bold=False)
 
         draw.text((146, 31), "APEX LEGENDS", font=source_font, fill=(216, 35, 42, 255))
         self._draw_text_with_shadow(
@@ -3110,7 +3713,7 @@ class Main(Star):
         )
         draw.text(
             (620, 296),
-            f"来源 {season_info.source}",
+            source_text,
             font=source_font,
             fill=(178, 190, 204, 230),
         )
@@ -3120,6 +3723,15 @@ class Main(Star):
     @staticmethod
     def _season_end_label() -> str:
         return "赛季结束时间"
+
+    @staticmethod
+    def _season_source_label(source: str) -> str:
+        text = str(source or "").strip()
+        if not text:
+            return "来源 未知"
+        parsed = urlsplit(text if "://" in text else f"https://{text}")
+        host = parsed.netloc or parsed.path.split("/")[0]
+        return f"来源 {host or text}"
 
     @staticmethod
     def _centered_text_x(draw, text: str, font, left: int, right: int) -> float:

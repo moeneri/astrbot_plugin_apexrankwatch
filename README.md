@@ -14,35 +14,9 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 
 ## 常用命令效果
 
-### `/新赛季`
+下图包含 `/新赛季`、`/猎杀`、`/地图`、`/apexrank moeneri` 和 `/apexrankwatch moeneri pc` 的常用输出效果。
 
-查询当前赛季结束时间。
-
-![新赛季](assets/readme/season_current.png)
-
-### `/猎杀`
-
-查询本赛季 PC 猎杀线与大师数量。
-
-![猎杀线](assets/readme/predator_pc.png)
-
-### `/地图`
-
-查询当前排位地图轮换。
-
-![排位地图](assets/readme/map_ranked.png)
-
-### `/apexrank moeneri`
-
-查询玩家段位、在线状态和当前英雄。
-
-![玩家段位](assets/readme/player_rank_moeneri.png)
-
-### `/apexrankwatch moeneri pc`
-
-将玩家加入群监控；下图为排位分变化后的主动通知示例。
-
-![持续监控变化](assets/readme/rankwatch_delta.png)
+![常用命令效果总览](assets/readme/command_effects_overview.png)
 
 ## 命令
 
