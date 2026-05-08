@@ -1,6 +1,6 @@
 name: astrbot_plugin_apexrankwatch
 display_name: Apex Rank Watch
-version: 2.1.0
+version: 2.1.1
 author: moeneri
 description: 可以用来查询玩家段位，等级，赛季结束时间，大师猎杀数量，猎杀底分。还有能够持续自动监测玩家段位分数变化并且通知。
 desc: 可以用来查询玩家段位，等级，赛季结束时间，大师猎杀数量，猎杀底分。还有能够持续自动监测玩家段位分数变化并且通知。
