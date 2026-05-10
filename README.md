@@ -6,7 +6,7 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 
 - 查询玩家段位、RP、等级、在线状态和当前英雄，并输出图片卡片
 - 将玩家加入群监控，排位分变化后主动推送图片通知
-- 查询排位地图轮换和三人赛匹配地图轮换
+- 查询排位地图轮换、API 校准的排位未来 24 小时地图和三人赛匹配地图轮换
 - 查询当前赛季结束时间
 - 查询本赛季猎杀线和大师数量（包含猎杀）
 - 支持玩家名、`uid:`、`uuid:` 查询
@@ -29,6 +29,7 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 | `/apexranklist` | 查看当前群监控列表 |
 | `/apexrankremove <玩家名\|uid:...> [平台]` | 从当前群移除玩家监控 |
 | `/map` | 查询排位地图轮换 |
+| `/全天地图` | 查询 API 校准的排位未来 24 小时地图 |
 | `/匹配地图` | 查询三人赛匹配地图轮换 |
 | `/apexseason` | 查询当前赛季信息 |
 | `/apexpredator [平台]` | 查询猎杀线和大师数量 |
@@ -43,6 +44,7 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 - 移除监控：`/apex移除`、`/取消持续视奸`
 - 赛季查询：`/apex赛季`、`/新赛季`
 - 排位地图：`/地图`、`/排位地图`、`/apexmap`、`/apexrankmap`
+- 全天地图：`/全天排位地图`、`/今日地图`、`/今日排位地图`、`/dailymap`
 - 猎杀线：`/apex猎杀`、`/猎杀`
 - 黑名单：`/apex黑名单`、`/不准视奸`、`/apexban`
 - 帮助：`/apexrankhelp`、`/apex帮助`
@@ -55,6 +57,7 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 /apexrankwatch moeneri pc
 /apexrankremove moeneri pc
 /map
+/全天地图
 /匹配地图
 /apexpredator pc
 ```
@@ -88,7 +91,8 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 
 ## 注意事项
 
-- 地图轮换、玩家段位和猎杀线来自 Apex Legends API，网络波动或 API 限流时可能查询失败。
+- `/map`、玩家段位和猎杀线来自 Apex Legends API，网络波动或 API 限流时可能查询失败。
+- `/全天地图` 当前/下一张以 Apex Legends API 为准，后续按排位网页地图池推断；如果网页排期未通过 API 校验，只显示 API 当前/下一张。
 - 赛季结束时间来自公开倒计时页面，插件会统一按北京时间展示。
 - 同名玩家可能在多个平台存在记录，建议在命令后显式填写平台。
 - 监控通知依赖 AstrBot 的主动消息能力；如果当前适配器不支持主动消息，查询命令仍可正常使用。

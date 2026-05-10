@@ -23,12 +23,15 @@ if __package__:
         ApexApiClient,
         ApexApiError,
         ApexPlayerStats,
+        DailyMapScheduleInfo,
         MapRotationEntry,
         MapRotationInfo,
+        MapScheduleEntry,
         PlayerNotFoundError,
         PredatorInfo,
         PredatorPlatformStats,
         SeasonInfo,
+        format_schedule_remaining,
         is_likely_season_reset,
         is_score_drop_abnormal,
         normalize_platform,
@@ -40,12 +43,15 @@ else:
         ApexApiClient,
         ApexApiError,
         ApexPlayerStats,
+        DailyMapScheduleInfo,
         MapRotationEntry,
         MapRotationInfo,
+        MapScheduleEntry,
         PlayerNotFoundError,
         PredatorInfo,
         PredatorPlatformStats,
         SeasonInfo,
+        format_schedule_remaining,
         is_likely_season_reset,
         is_score_drop_abnormal,
         normalize_platform,
@@ -150,6 +156,7 @@ class Main(Star):
         "map",
         "apexmap",
         "apexrankmap",
+        "dailymap",
         "apextest",
         "apexhelp",
         "apex帮助",
@@ -163,6 +170,10 @@ class Main(Star):
         "地图",
         "排位地图",
         "匹配地图",
+        "全天地图",
+        "全天排位地图",
+        "今日地图",
+        "今日排位地图",
         "apex猎杀",
         "猎杀",
         "视奸",
@@ -964,6 +975,44 @@ class Main(Star):
                 event,
                 self._format_map_rotation_text(rotation_info, mode="battle_royale"),
             )
+
+    @filter.command("全天地图", alias={"全天排位地图", "今日地图", "今日排位地图", "dailymap"})
+    async def apexdailymap(self, event: AstrMessageEvent):
+        deny = self._guard_access(event)
+        if deny:
+            yield self._plain(event, "\n".join([self._time_line(), deny]))
+            return
+
+        if not self._config.api_key:
+            yield self._plain(event, self._missing_api_key_text())
+            return
+
+        try:
+            schedule = await self._api.fetch_daily_map_schedule("ranked")
+        except Exception as exc:
+            logger.error(f"全天地图查询失败: {exc}")
+            yield self._plain(event, self._api_request_failed_text("全天地图查询"))
+            return
+
+        if not schedule.entries:
+            yield self._plain(
+                event,
+                "\n".join(
+                    [
+                        self._time_line(),
+                        "⚠️ 暂未获取到全天地图排期，请稍后再试",
+                        "ℹ️ /map 当前地图仍使用 API 实时查询",
+                    ]
+                ),
+            )
+            return
+
+        try:
+            image_path = self._render_daily_map_schedule_image(schedule)
+            yield self._image(event, image_path)
+        except Exception as exc:
+            logger.error(f"全天地图图片生成失败，已回退文字输出: {exc}")
+            yield self._plain(event, self._format_daily_map_schedule_text(schedule))
 
     @filter.command("apexpredator", alias={"apex猎杀", "猎杀"})
     async def apexpredator(self, event: AstrMessageEvent, platform: str = ""):
@@ -1840,6 +1889,7 @@ class Main(Star):
             "【信息】",
             "/apexseason [赛季号]  别名：/apex赛季 /新赛季",
             "/map  别名：/地图 /排位地图 /apexmap /apexrankmap（排位地图轮换）",
+            "/全天地图（API 校准排位未来 24 小时地图）",
             "/匹配地图（三人赛地图轮换）",
             "/apexpredator [平台]  别名：/apex猎杀 /猎杀",
             "例：/apexseason 28  或  /apexseason current",
@@ -1926,6 +1976,7 @@ class Main(Star):
                 "信息",
                 [
                     ("/map /地图 /排位地图", "排位地图轮换，默认输出图片"),
+                    ("/全天地图", "API 校准排位未来 24 小时地图"),
                     ("/匹配地图", "三人赛地图轮换"),
                     ("/apexpredator [平台] /apex猎杀 /猎杀", "大师数量与猎杀底分"),
                     ("/apexseason /新赛季", "当前赛季结束时间"),
@@ -2017,7 +2068,7 @@ class Main(Star):
 
         row_top = box[1] + 92
         available = max(1, box[3] - row_top - 22)
-        row_height = max(66, available // max(1, len(rows)))
+        row_height = max(54, available // max(1, len(rows)))
         for index, (command, desc) in enumerate(rows):
             top = row_top + index * row_height
             if top + 56 > box[3] - 16:
@@ -3880,6 +3931,328 @@ class Main(Star):
 
         lines.append("ℹ️ 时间均为北京时间")
         return "\n".join(lines)
+
+    def _format_daily_map_schedule_text(self, schedule: DailyMapScheduleInfo) -> str:
+        lines = [
+            self._time_line(),
+            f"🗺️ {schedule.title}",
+            f"📅 日期：{schedule.date_label}（北京时间）",
+            "——",
+        ]
+        for entry in schedule.entries:
+            lines.append(
+                f"{self._schedule_entry_status(entry)} {self._map_card_name(entry)}："
+                f"{self._format_schedule_entry_range(entry)}"
+            )
+        lines.extend(
+            [
+                "——",
+                f"ℹ️ {schedule.source_note}",
+                "ℹ️ /map 当前地图仍使用 API 实时数据",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _render_daily_map_schedule_image(self, schedule: DailyMapScheduleInfo) -> Path:
+        if Image is None:
+            raise RuntimeError("缺少 Pillow，无法生成全天地图图片")
+
+        if not schedule.entries:
+            raise ValueError("缺少全天地图排期数据")
+
+        output_dir = self._map_card_output_dir()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        render_minute = int(time.time() // 60)
+        cache_key = self._daily_map_schedule_image_cache_key(
+            output_dir, schedule, render_minute=render_minute
+        )
+        cached_path = self._get_cached_map_rotation_image(cache_key)
+        if cached_path is not None:
+            return cached_path
+
+        image = self._build_daily_map_schedule_card(schedule)
+        output_path = output_dir / f"daily_map_{schedule.mode}_{now_epoch_ms()}.png"
+        image.save(output_path, format="PNG", optimize=True)
+        self._set_cached_map_rotation_image(cache_key, output_path)
+        self._cleanup_old_daily_map_cards(output_dir)
+        return output_path
+
+    def _daily_map_schedule_image_cache_key(
+        self,
+        output_dir: Path,
+        schedule: DailyMapScheduleInfo,
+        render_minute: int | None = None,
+    ) -> tuple:
+        if render_minute is None:
+            render_minute = int(time.time() // 60)
+        return (
+            "daily_map",
+            "v2",
+            str(output_dir.resolve()),
+            schedule.mode,
+            schedule.date_label,
+            int(render_minute),
+            tuple(
+                (entry.map_name, entry.start_timestamp, entry.end_timestamp)
+                for entry in schedule.entries
+            ),
+        )
+
+    def _cleanup_old_daily_map_cards(self, output_dir: Path, keep: int = 8) -> None:
+        try:
+            files = sorted(
+                output_dir.glob("daily_map_*.png"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+            for file in files[keep:]:
+                file.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug(f"清理全天地图缓存图片失败: {exc}")
+
+    def _build_daily_map_schedule_card(self, schedule: DailyMapScheduleInfo):
+        width = 900
+        entries = list(schedule.entries)
+        row_gap = 10
+        row_height = 88 if len(entries) <= 8 else 72
+        header_height = 154
+        footer_height = 64
+        height = header_height + len(entries) * (row_height + row_gap) + footer_height + 18
+
+        canvas = Image.new("RGBA", (width, height), (7, 8, 11, 255))
+        draw = ImageDraw.Draw(canvas)
+        hero_entry = self._current_schedule_entry(entries) or entries[0]
+        hero_bg = self._map_background(hero_entry, (width, header_height), focus_y=0.42)
+        canvas.alpha_composite(hero_bg, (0, 0))
+        self._overlay_rect(canvas, (0, 0, width, header_height), (0, 0, 0, 126))
+        self._draw_horizontal_gradient(canvas, 0, header_height, 210, left=True)
+
+        title_font = self._font(42, bold=True)
+        meta_font = self._font(22)
+        badge_font = self._font(20, bold=True)
+        self._draw_text_with_shadow(
+            draw,
+            (34, 26),
+            schedule.title,
+            title_font,
+            fill=(255, 255, 255, 255),
+        )
+        self._draw_text_with_shadow(
+            draw,
+            (36, 82),
+            f"{schedule.date_label}  北京时间",
+            meta_font,
+            fill=(226, 232, 240, 238),
+        )
+        badge = (690, 28, 852, 66)
+        draw.rounded_rectangle(
+            badge,
+            radius=8,
+            fill=(232, 43, 45, 235),
+            outline=(255, 118, 92, 180),
+            width=1,
+        )
+        self._draw_centered_stroked_text(
+            draw,
+            "排位全天",
+            badge_font,
+            badge[0],
+            badge[2],
+            badge[1],
+            badge[3],
+            (255, 255, 255, 255),
+        )
+        draw.rectangle((34, 124, 260, 130), fill=(232, 43, 45, 230))
+
+        now = datetime.now(SHANGHAI_TZ)
+        y = header_height + 14
+        for index, entry in enumerate(entries):
+            self._draw_daily_map_row(
+                canvas=canvas,
+                draw=draw,
+                entry=entry,
+                index=index,
+                x=28,
+                y=y,
+                width=width - 56,
+                height=row_height,
+                now=now,
+            )
+            y += row_height + row_gap
+
+        footer_y = height - footer_height
+        draw.rectangle((0, footer_y, width, height), fill=(14, 16, 22, 236))
+        footer_font = self._font(17)
+        note = f"{schedule.source_note} · 生成 {schedule.generated_at} · /map 使用 API 实时数据"
+        note_font = self._fit_font(draw, note, 17, 13, width - 64)
+        draw.text((32, footer_y + 20), note, font=note_font, fill=(224, 232, 242, 238))
+        return canvas.convert("RGB")
+
+    def _draw_daily_map_row(
+        self,
+        canvas,
+        draw,
+        entry: MapScheduleEntry,
+        index: int,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        now: datetime,
+    ) -> None:
+        bg = self._map_background(entry, (width, height), focus_y=0.48)
+        canvas.alpha_composite(bg, (x, y))
+        active = self._schedule_entry_is_current(entry, now)
+        overlay_alpha = 88 if active else 138
+        self._overlay_rect(canvas, (x, y, x + width, y + height), (0, 0, 0, overlay_alpha))
+        outline = (232, 43, 45, 230) if active else (255, 255, 255, 42)
+        draw.rounded_rectangle((x, y, x + width, y + height), radius=8, outline=outline, width=2)
+
+        line_x = x + 34
+        if index > 0:
+            draw.line((line_x, y - 10, line_x, y + 22), fill=(232, 43, 45, 160), width=3)
+        if index < 99:
+            draw.line((line_x, y + height - 22, line_x, y + height + 10), fill=(232, 43, 45, 120), width=3)
+        dot_fill = (232, 43, 45, 255) if active else (238, 242, 246, 230)
+        draw.ellipse((line_x - 8, y + height // 2 - 8, line_x + 8, y + height // 2 + 8), fill=dot_fill)
+
+        status = self._schedule_entry_status(entry, now)
+        status_box = (x + 58, y + 18, x + 136, y + 48)
+        status_fill = (232, 43, 45, 230) if status == "当前" else (15, 18, 24, 205)
+        draw.rounded_rectangle(status_box, radius=6, fill=status_fill, outline=(255, 255, 255, 50), width=1)
+        self._draw_centered_stroked_text(
+            draw,
+            status,
+            self._font(17, bold=True),
+            status_box[0],
+            status_box[2],
+            status_box[1],
+            status_box[3],
+            (255, 255, 255, 245),
+        )
+
+        name = self._map_card_name(entry)
+        name_font = self._fit_font(draw, name, 34, 24, max_width=360, bold=True)
+        self._draw_text_with_shadow(
+            draw,
+            (x + 156, y + 15),
+            name,
+            name_font,
+            fill=(255, 255, 255, 255),
+        )
+        if entry.map_name and entry.map_name != name:
+            draw.text(
+                (x + 158, y + 52),
+                entry.map_name,
+                font=self._font(16),
+                fill=(218, 226, 235, 215),
+            )
+
+        time_text = self._format_schedule_entry_range(entry)
+        time_font = self._fit_font(draw, time_text, 24, 17, max_width=270, bold=True)
+        time_box = draw.textbbox((0, 0), time_text, font=time_font)
+        time_w = time_box[2] - time_box[0]
+        self._draw_text_with_shadow(
+            draw,
+            (x + width - 28 - time_w, y + 21),
+            time_text,
+            time_font,
+            fill=(255, 255, 255, 255),
+        )
+        detail_text = (
+            format_schedule_remaining(entry, now)
+            if active
+            else f"{max(1, entry.duration_secs // 60)} 分钟"
+        )
+        detail_font = self._fit_font(
+            draw,
+            detail_text,
+            20 if active else 17,
+            15 if active else 14,
+            max_width=270,
+            bold=active,
+        )
+        detail_box = draw.textbbox((0, 0), detail_text, font=detail_font)
+        detail_w = detail_box[2] - detail_box[0]
+        detail_x = x + width - 28 - detail_w
+        detail_y = y + 52
+        detail_fill = (118, 236, 188, 250) if active else (218, 226, 235, 215)
+        if active:
+            self._draw_text_with_shadow(
+                draw,
+                (detail_x, detail_y),
+                detail_text,
+                detail_font,
+                fill=detail_fill,
+            )
+        else:
+            draw.text(
+                (detail_x, detail_y),
+                detail_text,
+                font=detail_font,
+                fill=detail_fill,
+            )
+
+        if active:
+            self._draw_schedule_progress(
+                draw,
+                entry,
+                (x + 156, y + height - 13, x + width - 28, y + height - 7),
+                now,
+            )
+
+    def _draw_schedule_progress(
+        self,
+        draw,
+        entry: MapScheduleEntry,
+        box: tuple[int, int, int, int],
+        now: datetime,
+    ) -> None:
+        start = self._timestamp_to_beijing_datetime(entry.start_timestamp)
+        end = self._timestamp_to_beijing_datetime(entry.end_timestamp)
+        if not start or not end:
+            return
+        total = max(1, (end - start).total_seconds())
+        elapsed = min(total, max(0, (now - start).total_seconds()))
+        fraction = elapsed / total
+        draw.rounded_rectangle(box, radius=3, fill=(255, 255, 255, 48))
+        fill_box = (box[0], box[1], box[0] + int((box[2] - box[0]) * fraction), box[3])
+        draw.rounded_rectangle(fill_box, radius=3, fill=(49, 191, 139, 235))
+
+    def _current_schedule_entry(
+        self, entries: list[MapScheduleEntry]
+    ) -> MapScheduleEntry | None:
+        now = datetime.now(SHANGHAI_TZ)
+        for entry in entries:
+            if self._schedule_entry_is_current(entry, now):
+                return entry
+        return None
+
+    def _schedule_entry_status(
+        self, entry: MapScheduleEntry, now: datetime | None = None
+    ) -> str:
+        current = now or datetime.now(SHANGHAI_TZ)
+        start = self._timestamp_to_beijing_datetime(entry.start_timestamp)
+        end = self._timestamp_to_beijing_datetime(entry.end_timestamp)
+        if start and end and start <= current < end:
+            return "当前"
+        if end and end <= current:
+            return "已过"
+        return "待轮换"
+
+    def _schedule_entry_is_current(
+        self, entry: MapScheduleEntry, now: datetime | None = None
+    ) -> bool:
+        return self._schedule_entry_status(entry, now) == "当前"
+
+    def _format_schedule_entry_range(self, entry: MapScheduleEntry) -> str:
+        start = self._timestamp_to_beijing_datetime(entry.start_timestamp)
+        end = self._timestamp_to_beijing_datetime(entry.end_timestamp)
+        if start and end:
+            if start.date() == end.date():
+                return f"{start:%H:%M} - {end:%H:%M}"
+            return f"{start:%m-%d %H:%M} - {end:%m-%d %H:%M}"
+        return f"{entry.readable_start} - {entry.readable_end}"
 
     def _render_map_rotation_image(
         self, rotation_info: MapRotationInfo, mode: str = "ranked"

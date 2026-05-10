@@ -26,6 +26,8 @@ APEX_API_VERIFY_URL = "https://portal.apexlegendsapi.com/discord-auth"
 APEX_SEASONS_HOME_URL = "https://apexseasons.online/"
 ESPORTSTALES_SEASONS_URL = "https://www.esportstales.com/apex-legends/season-end-date"
 APEX_STATUS_SEASON_COUNTDOWN_URL = "https://apexlegendsstatus.com/new-season-countdown"
+APEX_STATUS_RANKED_MAP_URL = "https://apexlegendsstatus.com/current-map/battle_royale/ranked"
+APEX_STATUS_PUBS_MAP_URL = "https://apexlegendsstatus.com/current-map/battle_royale/pubs"
 APEX_STATUS_SEASON_DURATION_DAYS = 91
 
 JSONLD_SCRIPT_RE = re.compile(
@@ -73,6 +75,12 @@ APEX_STATUS_START_TIME_RE = re.compile(r"\bstartTime\s*=\s*(\d{9,12})\b", re.IGN
 APEX_STATUS_SEASON_TITLE_RE = re.compile(
     r"Countdown\s+to\s+Season\s+(\d+)(?:\s*:\s*([^\"<\n\r]+))?",
     re.IGNORECASE,
+)
+MAP_SCHEDULE_ENTRY_RE = re.compile(
+    r"<h3[^>]*>(?P<map>.*?)</h3>.*?"
+    r"From\s*<span\s+data-tz=[\"'](?P<start>\d+)[\"'][^>]*>.*?</span>"
+    r"\s*to\s*<span\s+data-tz=[\"'](?P<end>\d+)[\"'][^>]*>.*?</span>",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
@@ -199,6 +207,30 @@ class MapRotationInfo:
     battle_royale: MapRotationMode = field(default_factory=MapRotationMode)
     ranked: MapRotationMode = field(default_factory=MapRotationMode)
     ltm: MapRotationMode = field(default_factory=MapRotationMode)
+
+
+@dataclass
+class MapScheduleEntry:
+    map_name: str
+    map_name_zh: str
+    start_timestamp: int
+    end_timestamp: int
+    readable_start: str
+    readable_end: str
+    duration_secs: int
+    asset: str = ""
+    code: str = ""
+
+
+@dataclass
+class DailyMapScheduleInfo:
+    mode: str
+    title: str
+    date_label: str
+    generated_at: str
+    source_url: str
+    source_note: str
+    entries: list[MapScheduleEntry] = field(default_factory=list)
 
 
 @dataclass
@@ -348,6 +380,9 @@ class ApexApiClient:
         self._live_cache_ttl_seconds = 60
         self._map_rotation_cache: tuple[float, MapRotationInfo] | None = None
         self._map_rotation_lock = asyncio.Lock()
+        self._daily_map_cache_ttl_seconds = 10 * 60
+        self._daily_map_cache: dict[str, tuple[float, DailyMapScheduleInfo]] = {}
+        self._daily_map_lock = asyncio.Lock()
         self._predator_cache: tuple[float, PredatorInfo] | None = None
         self._predator_lock = asyncio.Lock()
         self._split_index_cache: tuple[float, dict[int, list[_SplitTextRange]]] | None = None
@@ -390,6 +425,46 @@ class ApexApiClient:
             rotation_info = _parse_map_rotation_info(data)
             self._map_rotation_cache = (time.monotonic(), rotation_info)
             return rotation_info
+
+    async def fetch_daily_map_schedule(self, mode: str = "ranked") -> DailyMapScheduleInfo:
+        normalized_mode = _normalize_daily_map_mode(mode)
+        now = datetime.now(SHANGHAI_TZ)
+        cache_key = f"{normalized_mode}:{now:%Y-%m-%d}"
+        cached = self._get_cached_daily_map_schedule(cache_key)
+        if cached is not None:
+            return cached
+
+        async with self._daily_map_lock:
+            cached = self._get_cached_daily_map_schedule(cache_key)
+            if cached is not None:
+                return cached
+
+            source_url = _daily_map_schedule_url(normalized_mode)
+            html = await self._request_text_with_retry(source_url)
+            raw_entries = parse_map_schedule_page(html)
+            rotation_info = await self.fetch_map_rotation_info()
+            rotation_mode = (
+                rotation_info.battle_royale
+                if normalized_mode == "battle_royale"
+                else rotation_info.ranked
+            )
+            daily_entries, source_note = build_daily_map_entries_from_api(
+                raw_entries,
+                now,
+                current=rotation_mode.current,
+                next_entry=rotation_mode.next,
+            )
+            schedule = DailyMapScheduleInfo(
+                mode=normalized_mode,
+                title=_daily_map_schedule_title(normalized_mode),
+                date_label=f"{now:%Y-%m-%d}",
+                generated_at=f"{now:%Y-%m-%d %H:%M:%S}",
+                source_url=source_url,
+                source_note=source_note,
+                entries=daily_entries,
+            )
+            self._daily_map_cache[cache_key] = (time.monotonic(), schedule)
+            return schedule
 
     async def fetch_predator_info(self) -> PredatorInfo:
         cached = self._get_cached_predator()
@@ -798,6 +873,18 @@ class ApexApiClient:
             return None
         return rotation_info
 
+    def _get_cached_daily_map_schedule(
+        self, cache_key: str
+    ) -> DailyMapScheduleInfo | None:
+        cached = self._daily_map_cache.get(cache_key)
+        if not cached:
+            return None
+        saved_at, schedule = cached
+        if time.monotonic() - saved_at > self._daily_map_cache_ttl_seconds:
+            self._daily_map_cache.pop(cache_key, None)
+            return None
+        return schedule
+
     def _get_cached_predator(self) -> PredatorInfo | None:
         cached = self._predator_cache
         if not cached:
@@ -857,6 +944,422 @@ def translate_state(state_text: Any) -> str:
     if time_info:
         translated += time_info
     return translated
+
+
+def parse_map_schedule_page(html: str) -> list[MapScheduleEntry]:
+    entries: list[MapScheduleEntry] = []
+    seen: set[tuple[str, int, int]] = set()
+    for match in MAP_SCHEDULE_ENTRY_RE.finditer(str(html or "")):
+        map_name = _clean_html_text(match.group("map")) or "未知"
+        start_timestamp = _to_int(match.group("start")) or 0
+        end_timestamp = _to_int(match.group("end")) or 0
+        if not start_timestamp or not end_timestamp or end_timestamp <= start_timestamp:
+            continue
+        key = (map_name, start_timestamp, end_timestamp)
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(
+            _make_map_schedule_entry(
+                map_name=map_name,
+                start_timestamp=start_timestamp,
+                end_timestamp=end_timestamp,
+            )
+        )
+    return sorted(entries, key=lambda item: item.start_timestamp)
+
+
+def filter_daily_map_entries(
+    entries: list[MapScheduleEntry], day_ref: datetime | None = None
+) -> list[MapScheduleEntry]:
+    day_start, day_end = _beijing_day_bounds(day_ref)
+    return [
+        entry
+        for entry in sorted(entries, key=lambda item: item.start_timestamp)
+        if _entry_end_dt(entry) > day_start and _entry_start_dt(entry) < day_end
+    ]
+
+
+def build_daily_map_entries(
+    entries: list[MapScheduleEntry], day_ref: datetime | None = None
+) -> list[MapScheduleEntry]:
+    ordered = _dedupe_schedule_entries(entries)
+    if not ordered:
+        return []
+
+    day_start, day_end = _beijing_day_bounds(day_ref)
+    expanded = list(ordered)
+    cycle = _infer_map_cycle(expanded)
+    duration_secs = _infer_schedule_duration(expanded)
+    if cycle and duration_secs > 0:
+        expanded = _expand_schedule_to_bounds(
+            expanded, cycle, duration_secs, day_start, day_end
+        )
+    return filter_daily_map_entries(expanded, day_ref)
+
+
+def build_daily_map_entries_from_api(
+    entries: list[MapScheduleEntry],
+    day_ref: datetime | None = None,
+    current: MapRotationEntry | None = None,
+    next_entry: MapRotationEntry | None = None,
+) -> tuple[list[MapScheduleEntry], str]:
+    anchors = [
+        _schedule_entry_from_rotation_entry(item)
+        for item in (current, next_entry)
+        if item is not None
+    ]
+    anchors = [item for item in anchors if item.start_timestamp and item.end_timestamp]
+
+    calibrated_entries, verified = _calibrate_schedule_entries_with_api(
+        entries,
+        current=current,
+        next_entry=next_entry,
+    )
+    if verified and calibrated_entries:
+        merged = _merge_api_anchor_entries(calibrated_entries, anchors)
+        return (
+            build_rolling_map_entries(merged, current.start_timestamp),
+            "API 校准当前/下一张，后续按排位网页地图池推断",
+        )
+
+    if anchors:
+        return (
+            _dedupe_schedule_entries(anchors),
+            "网页全天排期未通过 API 校验，仅显示 API 当前/下一张",
+        )
+
+    return (
+        build_daily_map_entries(entries, day_ref),
+        "网页排期抓取，时间均为北京时间，仅供参考",
+    )
+
+
+def build_rolling_map_entries(
+    entries: list[MapScheduleEntry],
+    start_timestamp: int,
+    hours: int = 24,
+) -> list[MapScheduleEntry]:
+    ordered = _dedupe_schedule_entries(entries)
+    if not ordered or not start_timestamp:
+        return []
+
+    window_start = datetime.fromtimestamp(
+        int(start_timestamp), tz=timezone.utc
+    ).astimezone(SHANGHAI_TZ)
+    window_end = window_start + timedelta(hours=max(1, int(hours)))
+    expanded = list(ordered)
+    cycle = _infer_map_cycle(expanded)
+    duration_secs = _infer_schedule_duration(expanded)
+    if cycle and duration_secs > 0:
+        expanded = _expand_schedule_to_bounds(
+            expanded, cycle, duration_secs, window_start, window_end
+        )
+    return [
+        entry
+        for entry in _dedupe_schedule_entries(expanded)
+        if _entry_end_dt(entry) > window_start and _entry_start_dt(entry) < window_end
+    ]
+
+
+def _calibrate_schedule_entries_with_api(
+    entries: list[MapScheduleEntry],
+    current: MapRotationEntry | None = None,
+    next_entry: MapRotationEntry | None = None,
+) -> tuple[list[MapScheduleEntry], bool]:
+    ordered = _dedupe_schedule_entries(entries)
+    if not ordered or current is None or not current.start_timestamp:
+        return ordered, False
+
+    best_offset: int | None = None
+    for index, entry in enumerate(ordered):
+        if not _same_map_name(entry.map_name, current.map_name):
+            continue
+        offset = int(current.start_timestamp) - int(entry.start_timestamp)
+        if not _schedule_entry_matches_api(entry, current, offset):
+            continue
+        if next_entry is not None and next_entry.start_timestamp:
+            if index + 1 >= len(ordered):
+                continue
+            if not _schedule_entry_matches_api(ordered[index + 1], next_entry, offset):
+                continue
+        best_offset = offset
+        break
+
+    if best_offset is None:
+        return ordered, False
+    if best_offset == 0:
+        return ordered, True
+    return [_shift_schedule_entry(entry, best_offset) for entry in ordered], True
+
+
+def _schedule_entry_matches_api(
+    entry: MapScheduleEntry,
+    api_entry: MapRotationEntry,
+    offset: int,
+) -> bool:
+    if not _same_map_name(entry.map_name, api_entry.map_name):
+        return False
+    shifted_start = int(entry.start_timestamp) + offset
+    shifted_end = int(entry.end_timestamp) + offset
+    api_start = int(api_entry.start_timestamp or 0)
+    api_end = int(api_entry.end_timestamp or 0)
+    if not api_start or not api_end:
+        return False
+    return abs(shifted_start - api_start) <= 60 and abs(shifted_end - api_end) <= 60
+
+
+def _same_map_name(left: str, right: str) -> bool:
+    return _normalize_map_name_for_compare(left) == _normalize_map_name_for_compare(right)
+
+
+def _normalize_map_name_for_compare(value: str) -> str:
+    return "".join(
+        ch
+        for ch in str(value or "").lower().replace("'", "").replace("’", "")
+        if ch.isalnum()
+    )
+
+
+def _shift_schedule_entry(entry: MapScheduleEntry, offset: int) -> MapScheduleEntry:
+    return _make_map_schedule_entry(
+        entry.map_name,
+        int(entry.start_timestamp) + int(offset),
+        int(entry.end_timestamp) + int(offset),
+    )
+
+
+def _schedule_entry_from_rotation_entry(
+    entry: MapRotationEntry | None,
+) -> MapScheduleEntry | None:
+    if entry is None or not entry.start_timestamp or not entry.end_timestamp:
+        return None
+    return _make_map_schedule_entry(
+        entry.map_name,
+        int(entry.start_timestamp),
+        int(entry.end_timestamp),
+    )
+
+
+def _merge_api_anchor_entries(
+    entries: list[MapScheduleEntry],
+    anchors: list[MapScheduleEntry | None],
+) -> list[MapScheduleEntry]:
+    merged = list(entries)
+    for anchor in anchors:
+        if anchor is None:
+            continue
+        replaced = False
+        for index, entry in enumerate(merged):
+            if (
+                _same_map_name(entry.map_name, anchor.map_name)
+                and abs(entry.start_timestamp - anchor.start_timestamp) <= 60
+            ):
+                merged[index] = anchor
+                replaced = True
+                break
+        if not replaced:
+            merged.append(anchor)
+    return _dedupe_schedule_entries(merged)
+
+
+def format_schedule_remaining(
+    entry: MapScheduleEntry, now: datetime | None = None
+) -> str:
+    current = _coerce_beijing_datetime(now)
+    end = _entry_end_dt(entry)
+    remaining_seconds = max(0, int((end - current).total_seconds()))
+    minutes = remaining_seconds // 60
+    days = minutes // 1440
+    hours = (minutes % 1440) // 60
+    mins = minutes % 60
+    if days:
+        return f"剩余 {days}天{hours}时"
+    if hours:
+        return f"剩余 {hours}时{mins}分"
+    return f"剩余 {mins}分"
+
+
+def _make_map_schedule_entry(
+    map_name: str, start_timestamp: int, end_timestamp: int
+) -> MapScheduleEntry:
+    duration_secs = max(0, int(end_timestamp) - int(start_timestamp))
+    code = _map_code_from_name(map_name)
+    return MapScheduleEntry(
+        map_name=map_name,
+        map_name_zh=translate(map_name),
+        start_timestamp=int(start_timestamp),
+        end_timestamp=int(end_timestamp),
+        readable_start=_format_schedule_timestamp(start_timestamp),
+        readable_end=_format_schedule_timestamp(end_timestamp),
+        duration_secs=duration_secs,
+        asset=f"https://apexlegendsstatus.com/assets/maps/{code}.png" if code else "",
+        code=code,
+    )
+
+
+def _expand_schedule_to_bounds(
+    entries: list[MapScheduleEntry],
+    cycle: list[str],
+    duration_secs: int,
+    day_start: datetime,
+    day_end: datetime,
+) -> list[MapScheduleEntry]:
+    expanded = list(entries)
+
+    while expanded and _entry_start_dt(expanded[0]) > day_start:
+        first = expanded[0]
+        prev_name = _cycle_neighbor(cycle, first.map_name, step=-1)
+        if not prev_name:
+            break
+        prev_end = first.start_timestamp
+        prev_start = prev_end - duration_secs
+        expanded.insert(0, _make_map_schedule_entry(prev_name, prev_start, prev_end))
+
+    while expanded and _entry_end_dt(expanded[-1]) < day_end:
+        last = expanded[-1]
+        next_name = _cycle_neighbor(cycle, last.map_name, step=1)
+        if not next_name:
+            break
+        next_start = last.end_timestamp
+        next_end = next_start + duration_secs
+        expanded.append(_make_map_schedule_entry(next_name, next_start, next_end))
+
+    return _dedupe_schedule_entries(expanded)
+
+
+def _cycle_neighbor(cycle: list[str], map_name: str, step: int) -> str:
+    if not cycle:
+        return ""
+    try:
+        index = cycle.index(map_name)
+    except ValueError:
+        return ""
+    return cycle[(index + step) % len(cycle)]
+
+
+def _infer_map_cycle(entries: list[MapScheduleEntry]) -> list[str]:
+    names = [entry.map_name for entry in entries if entry.map_name]
+    if not names:
+        return []
+    max_cycle_len = min(8, len(names))
+    for cycle_len in range(1, max_cycle_len + 1):
+        candidate = names[:cycle_len]
+        if all(name == candidate[index % cycle_len] for index, name in enumerate(names)):
+            return candidate
+    return names[:max_cycle_len]
+
+
+def _infer_schedule_duration(entries: list[MapScheduleEntry]) -> int:
+    durations: dict[int, int] = {}
+    for entry in entries:
+        duration = max(0, entry.end_timestamp - entry.start_timestamp)
+        if not duration:
+            continue
+        durations[duration] = durations.get(duration, 0) + 1
+    if not durations:
+        return 0
+    return max(durations.items(), key=lambda item: (item[1], item[0]))[0]
+
+
+def _dedupe_schedule_entries(entries: list[MapScheduleEntry]) -> list[MapScheduleEntry]:
+    result: list[MapScheduleEntry] = []
+    seen: set[tuple[str, int, int]] = set()
+    for entry in sorted(entries, key=lambda item: item.start_timestamp):
+        key = (entry.map_name, entry.start_timestamp, entry.end_timestamp)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(entry)
+    return result
+
+
+def _clean_html_text(value: str) -> str:
+    text = re.sub(r"<[^>]+>", "", str(value or ""))
+    text = unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _beijing_day_bounds(day_ref: datetime | None = None) -> tuple[datetime, datetime]:
+    current = _coerce_beijing_datetime(day_ref)
+    day_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    return day_start, day_start + timedelta(days=1)
+
+
+def _coerce_beijing_datetime(value: datetime | None = None) -> datetime:
+    if value is None:
+        return datetime.now(SHANGHAI_TZ)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=SHANGHAI_TZ)
+    return value.astimezone(SHANGHAI_TZ)
+
+
+def _entry_start_dt(entry: MapScheduleEntry) -> datetime:
+    return datetime.fromtimestamp(entry.start_timestamp, tz=timezone.utc).astimezone(
+        SHANGHAI_TZ
+    )
+
+
+def _entry_end_dt(entry: MapScheduleEntry) -> datetime:
+    return datetime.fromtimestamp(entry.end_timestamp, tz=timezone.utc).astimezone(
+        SHANGHAI_TZ
+    )
+
+
+def _format_schedule_timestamp(timestamp: int) -> str:
+    try:
+        return datetime.fromtimestamp(int(timestamp), tz=timezone.utc).astimezone(
+            SHANGHAI_TZ
+        ).strftime("%m-%d %H:%M")
+    except Exception:
+        return "未知"
+
+
+def _map_code_from_name(map_name: str) -> str:
+    text = str(map_name or "").strip()
+    aliases = {
+        "Broken Moon": "Broken_Moon",
+        "E-District": "E-District",
+        "Kings Canyon": "Kings_Canyon",
+        "Olympus": "Olympus",
+        "Storm Point": "Storm_Point",
+        "World's Edge": "Worlds_Edge",
+        "Worlds Edge": "Worlds_Edge",
+    }
+    if text in aliases:
+        return aliases[text]
+    return "".join(
+        ch
+        for ch in text.replace("'", "").replace("’", "").replace(" ", "_")
+        if ch.isalnum() or ch in {"_", "-"}
+    )
+
+
+def _normalize_daily_map_mode(mode: str) -> str:
+    normalized = str(mode or "").strip().lower()
+    if normalized in {
+        "battle_royale",
+        "battle-royale",
+        "pubs",
+        "pub",
+        "match",
+        "匹配",
+        "三人赛",
+    }:
+        return "battle_royale"
+    return "ranked"
+
+
+def _daily_map_schedule_url(mode: str) -> str:
+    if _normalize_daily_map_mode(mode) == "battle_royale":
+        return APEX_STATUS_PUBS_MAP_URL
+    return APEX_STATUS_RANKED_MAP_URL
+
+
+def _daily_map_schedule_title(mode: str) -> str:
+    if _normalize_daily_map_mode(mode) == "battle_royale":
+        return "Apex 三人赛全天地图"
+    return "Apex 排位全天地图"
 
 
 def _parse_map_rotation_info(data: Any) -> MapRotationInfo:
