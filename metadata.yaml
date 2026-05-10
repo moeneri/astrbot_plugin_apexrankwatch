@@ -1,6 +1,6 @@
 name: astrbot_plugin_apexrankwatch
 display_name: Apex Rank Watch
-version: 2.1.5
+version: 2.1.6
 author: moeneri
 description: 查询 Apex 玩家段位与赛季信息，支持上下半赛季识别、群内持续监控、异常隔离与稳定化通知。
 repo: https://github.com/moeneri/astrbot_plugin_apexrankwatch

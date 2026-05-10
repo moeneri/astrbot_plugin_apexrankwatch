@@ -23,6 +23,7 @@ if __package__:
         ApexApiClient,
         ApexApiError,
         ApexPlayerStats,
+        DailyMapPoolState,
         DailyMapScheduleInfo,
         MapRotationEntry,
         MapRotationInfo,
@@ -43,6 +44,7 @@ else:
         ApexApiClient,
         ApexApiError,
         ApexPlayerStats,
+        DailyMapPoolState,
         DailyMapScheduleInfo,
         MapRotationEntry,
         MapRotationInfo,
@@ -198,6 +200,7 @@ class Main(Star):
         self._config = PluginConfig.from_raw(config)
         self._data_dir = self._resolve_data_dir(self._config.data_dir)
         self._settings_file = self._data_dir / "settings.json"
+        self._daily_map_pool_state_file = self._data_dir / "daily_map_pool_state.json"
         settings = self._load_settings()
         self._runtime_blacklist = self._normalize_settings_list(
             settings.get("runtime_blacklist", []),
@@ -210,6 +213,7 @@ class Main(Star):
         self._store = GroupStore(self._data_dir / "groups.json", logger)
         self._store.load()
         self._migrate_store_keys()
+        self._daily_map_pool_state = self._load_daily_map_pool_state()
 
         self._api = ApexApiClient(
             api_key=self._config.api_key,
@@ -332,6 +336,32 @@ class Main(Star):
             tmp_file.replace(self._settings_file)
         except Exception as exc:
             logger.error(f"保存插件设置失败: {exc}")
+
+    def _load_daily_map_pool_state(self) -> DailyMapPoolState:
+        if not self._daily_map_pool_state_file.exists():
+            return DailyMapPoolState()
+        try:
+            raw = json.loads(self._daily_map_pool_state_file.read_text(encoding="utf-8"))
+            return DailyMapPoolState.from_dict(raw)
+        except Exception as exc:
+            logger.error(f"加载排位地图池学习状态失败: {exc}")
+            return DailyMapPoolState()
+
+    def _save_daily_map_pool_state(self) -> None:
+        try:
+            self._daily_map_pool_state_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp_file = self._daily_map_pool_state_file.with_suffix(".tmp")
+            tmp_file.write_text(
+                json.dumps(
+                    self._daily_map_pool_state.to_dict(),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            tmp_file.replace(self._daily_map_pool_state_file)
+        except Exception as exc:
+            logger.error(f"保存排位地图池学习状态失败: {exc}")
 
     def _normalize_platform(self, platform: str) -> str:
         return normalize_platform(platform)
@@ -987,8 +1017,21 @@ class Main(Star):
             yield self._plain(event, self._missing_api_key_text())
             return
 
+        season_info = None
         try:
-            schedule = await self._api.fetch_daily_map_schedule("ranked")
+            season_info = await self._api.fetch_current_season_info()
+        except Exception as exc:
+            logger.warning(f"全天地图赛季信息获取失败，将仅使用 API 轮换学习状态: {exc}")
+
+        try:
+            schedule = await self._api.fetch_daily_map_schedule(
+                "ranked",
+                pool_state=self._daily_map_pool_state,
+                season_info=season_info,
+            )
+            if schedule.pool_state is not None:
+                self._daily_map_pool_state = schedule.pool_state
+                self._save_daily_map_pool_state()
         except Exception as exc:
             logger.error(f"全天地图查询失败: {exc}")
             yield self._plain(event, self._api_request_failed_text("全天地图查询"))
@@ -1889,7 +1932,7 @@ class Main(Star):
             "【信息】",
             "/apexseason [赛季号]  别名：/apex赛季 /新赛季",
             "/map  别名：/地图 /排位地图 /apexmap /apexrankmap（排位地图轮换）",
-            "/全天地图（API 校准排位未来 24 小时地图）",
+            "/全天地图（API 学习确认排位未来 24 小时地图）",
             "/匹配地图（三人赛地图轮换）",
             "/apexpredator [平台]  别名：/apex猎杀 /猎杀",
             "例：/apexseason 28  或  /apexseason current",
@@ -1976,7 +2019,7 @@ class Main(Star):
                 "信息",
                 [
                     ("/map /地图 /排位地图", "排位地图轮换，默认输出图片"),
-                    ("/全天地图", "API 校准排位未来 24 小时地图"),
+                    ("/全天地图", "API 学习确认排位未来 24 小时地图"),
                     ("/匹配地图", "三人赛地图轮换"),
                     ("/apexpredator [平台] /apex猎杀 /猎杀", "大师数量与猎杀底分"),
                     ("/apexseason /新赛季", "当前赛季结束时间"),
@@ -3941,7 +3984,8 @@ class Main(Star):
         ]
         for entry in schedule.entries:
             lines.append(
-                f"{self._schedule_entry_status(entry)} {self._map_card_name(entry)}："
+                f"{self._schedule_entry_status(entry)} {self._schedule_entry_source_label(schedule, entry)} "
+                f"{self._map_card_name(entry)}："
                 f"{self._format_schedule_entry_range(entry)}"
             )
         lines.extend(
@@ -3993,7 +4037,12 @@ class Main(Star):
             schedule.date_label,
             int(render_minute),
             tuple(
-                (entry.map_name, entry.start_timestamp, entry.end_timestamp)
+                (
+                    entry.map_name,
+                    entry.start_timestamp,
+                    entry.end_timestamp,
+                    getattr(entry, "source", ""),
+                )
                 for entry in schedule.entries
             ),
         )
@@ -4077,6 +4126,7 @@ class Main(Star):
                 width=width - 56,
                 height=row_height,
                 now=now,
+                source_label=self._schedule_entry_source_label(schedule, entry),
             )
             y += row_height + row_gap
 
@@ -4099,6 +4149,7 @@ class Main(Star):
         width: int,
         height: int,
         now: datetime,
+        source_label: str,
     ) -> None:
         bg = self._map_background(entry, (width, height), focus_y=0.48)
         canvas.alpha_composite(bg, (x, y))
@@ -4129,6 +4180,27 @@ class Main(Star):
             status_box[1],
             status_box[3],
             (255, 255, 255, 245),
+        )
+
+        source = source_label
+        source_box = (x + 58, y + 50, x + 136, y + 70)
+        source_fill = (
+            (49, 191, 139, 225)
+            if source == "API"
+            else (58, 104, 173, 218)
+            if source == "网页"
+            else (84, 94, 112, 210)
+        )
+        draw.rounded_rectangle(source_box, radius=5, fill=source_fill)
+        self._draw_centered_stroked_text(
+            draw,
+            source,
+            self._font(13, bold=True),
+            source_box[0],
+            source_box[2],
+            source_box[1],
+            source_box[3],
+            (255, 255, 255, 240),
         )
 
         name = self._map_card_name(entry)
@@ -4239,6 +4311,29 @@ class Main(Star):
         if end and end <= current:
             return "已过"
         return "待轮换"
+
+    def _schedule_entry_source_label(
+        self, schedule: DailyMapScheduleInfo, entry: MapScheduleEntry
+    ) -> str:
+        source = str(getattr(entry, "source", "") or "").lower()
+        if source == "api":
+            return "API"
+        if source == "web" and "API" not in schedule.source_note:
+            return "网页"
+        if source in {"web", "inferred"}:
+            return "推断"
+        for item in schedule.entries:
+            if (
+                item.map_name == entry.map_name
+                and item.start_timestamp == entry.start_timestamp
+                and item.end_timestamp == entry.end_timestamp
+            ):
+                item_source = str(getattr(item, "source", "") or "").lower()
+                if item_source == "api":
+                    return "API"
+                if item_source == "web" and "API" not in schedule.source_note:
+                    return "网页"
+        return "推断"
 
     def _schedule_entry_is_current(
         self, entry: MapScheduleEntry, now: datetime | None = None

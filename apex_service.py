@@ -29,6 +29,9 @@ APEX_STATUS_SEASON_COUNTDOWN_URL = "https://apexlegendsstatus.com/new-season-cou
 APEX_STATUS_RANKED_MAP_URL = "https://apexlegendsstatus.com/current-map/battle_royale/ranked"
 APEX_STATUS_PUBS_MAP_URL = "https://apexlegendsstatus.com/current-map/battle_royale/pubs"
 APEX_STATUS_SEASON_DURATION_DAYS = 91
+MAX_DAILY_MAP_CALIBRATION_OFFSET_SECS = 12 * 60 * 60
+SEASON_MAP_POOL_LOCK_BEFORE_END_SECS = 2 * 60 * 60
+SEASON_MAP_POOL_LOCK_AFTER_END_SECS = 12 * 60 * 60
 
 JSONLD_SCRIPT_RE = re.compile(
     r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
@@ -220,6 +223,58 @@ class MapScheduleEntry:
     duration_secs: int
     asset: str = ""
     code: str = ""
+    source: str = "web"
+
+
+@dataclass
+class DailyMapPoolState:
+    season_key: str = ""
+    season_end_iso: str = ""
+    status: str = "learning"
+    cycle: list[str] = field(default_factory=list)
+    last_current: str = ""
+    last_next: str = ""
+    last_current_start: int = 0
+    updated_at: int = 0
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "season_key": self.season_key,
+            "season_end_iso": self.season_end_iso,
+            "status": self.status,
+            "cycle": list(self.cycle),
+            "last_current": self.last_current,
+            "last_next": self.last_next,
+            "last_current_start": self.last_current_start,
+            "updated_at": self.updated_at,
+            "reason": self.reason,
+        }
+
+    @staticmethod
+    def from_dict(data: Any) -> "DailyMapPoolState":
+        if not isinstance(data, dict):
+            return DailyMapPoolState()
+        cycle_raw = data.get("cycle", [])
+        cycle = [
+            str(item).strip()
+            for item in cycle_raw
+            if str(item).strip()
+        ] if isinstance(cycle_raw, list) else []
+        status = str(data.get("status", "learning") or "learning").strip().lower()
+        if status not in {"learning", "confirmed"}:
+            status = "learning"
+        return DailyMapPoolState(
+            season_key=str(data.get("season_key", "") or ""),
+            season_end_iso=str(data.get("season_end_iso", "") or ""),
+            status=status,
+            cycle=cycle,
+            last_current=str(data.get("last_current", "") or ""),
+            last_next=str(data.get("last_next", "") or ""),
+            last_current_start=_to_int(data.get("last_current_start")) or 0,
+            updated_at=_to_int(data.get("updated_at")) or 0,
+            reason=str(data.get("reason", "") or ""),
+        )
 
 
 @dataclass
@@ -231,6 +286,7 @@ class DailyMapScheduleInfo:
     source_url: str
     source_note: str
     entries: list[MapScheduleEntry] = field(default_factory=list)
+    pool_state: DailyMapPoolState | None = None
 
 
 @dataclass
@@ -426,34 +482,55 @@ class ApexApiClient:
             self._map_rotation_cache = (time.monotonic(), rotation_info)
             return rotation_info
 
-    async def fetch_daily_map_schedule(self, mode: str = "ranked") -> DailyMapScheduleInfo:
+    async def fetch_daily_map_schedule(
+        self,
+        mode: str = "ranked",
+        pool_state: DailyMapPoolState | None = None,
+        season_info: SeasonInfo | None = None,
+    ) -> DailyMapScheduleInfo:
         normalized_mode = _normalize_daily_map_mode(mode)
         now = datetime.now(SHANGHAI_TZ)
+        use_pool_learning = normalized_mode == "ranked" and pool_state is not None
         cache_key = f"{normalized_mode}:{now:%Y-%m-%d}"
-        cached = self._get_cached_daily_map_schedule(cache_key)
+        cached = None if use_pool_learning else self._get_cached_daily_map_schedule(cache_key)
         if cached is not None:
             return cached
 
         async with self._daily_map_lock:
-            cached = self._get_cached_daily_map_schedule(cache_key)
+            cached = None if use_pool_learning else self._get_cached_daily_map_schedule(cache_key)
             if cached is not None:
                 return cached
 
-            source_url = _daily_map_schedule_url(normalized_mode)
-            html = await self._request_text_with_retry(source_url)
-            raw_entries = parse_map_schedule_page(html)
             rotation_info = await self.fetch_map_rotation_info()
             rotation_mode = (
                 rotation_info.battle_royale
                 if normalized_mode == "battle_royale"
                 else rotation_info.ranked
             )
-            daily_entries, source_note = build_daily_map_entries_from_api(
-                raw_entries,
-                now,
-                current=rotation_mode.current,
-                next_entry=rotation_mode.next,
-            )
+            source_url = _daily_map_schedule_url(normalized_mode)
+            updated_pool_state: DailyMapPoolState | None = None
+            if use_pool_learning:
+                updated_pool_state = update_daily_map_pool_state(
+                    pool_state,
+                    rotation_mode.current,
+                    rotation_mode.next,
+                    season_info,
+                    now,
+                )
+                daily_entries, source_note = build_daily_map_entries_from_pool_state(
+                    updated_pool_state,
+                    rotation_mode.current,
+                    rotation_mode.next,
+                )
+            else:
+                html = await self._request_text_with_retry(source_url)
+                raw_entries = parse_map_schedule_page(html)
+                daily_entries, source_note = build_daily_map_entries_from_api(
+                    raw_entries,
+                    now,
+                    current=rotation_mode.current,
+                    next_entry=rotation_mode.next,
+                )
             schedule = DailyMapScheduleInfo(
                 mode=normalized_mode,
                 title=_daily_map_schedule_title(normalized_mode),
@@ -462,8 +539,10 @@ class ApexApiClient:
                 source_url=source_url,
                 source_note=source_note,
                 entries=daily_entries,
+                pool_state=updated_pool_state,
             )
-            self._daily_map_cache[cache_key] = (time.monotonic(), schedule)
+            if not use_pool_learning:
+                self._daily_map_cache[cache_key] = (time.monotonic(), schedule)
             return schedule
 
     async def fetch_predator_info(self) -> PredatorInfo:
@@ -998,6 +1077,214 @@ def build_daily_map_entries(
     return filter_daily_map_entries(expanded, day_ref)
 
 
+def update_daily_map_pool_state(
+    state: DailyMapPoolState | dict[str, Any] | None,
+    current: MapRotationEntry | None,
+    next_entry: MapRotationEntry | None,
+    season_info: SeasonInfo | None = None,
+    now: datetime | None = None,
+) -> DailyMapPoolState:
+    current_state = (
+        state
+        if isinstance(state, DailyMapPoolState)
+        else DailyMapPoolState.from_dict(state)
+    )
+    now_dt = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
+    now_ts = int(now_dt.timestamp())
+    season_key = _daily_map_season_key(season_info) or current_state.season_key
+    season_end_iso = (
+        str(season_info.end_iso or "")
+        if season_info is not None
+        else current_state.season_end_iso
+    )
+
+    if current is None or next_entry is None:
+        return DailyMapPoolState(
+            season_key=season_key,
+            season_end_iso=season_end_iso,
+            status="learning",
+            cycle=list(current_state.cycle),
+            updated_at=now_ts,
+            reason="API 未返回完整地图轮换，暂时无法确认排位地图池",
+        )
+
+    current_name = str(current.map_name or "").strip()
+    next_name = str(next_entry.map_name or "").strip()
+    if not current_name or not next_name:
+        return DailyMapPoolState(
+            season_key=season_key,
+            season_end_iso=season_end_iso,
+            status="learning",
+            updated_at=now_ts,
+            reason="API 地图名称缺失，暂时无法确认排位地图池",
+        )
+
+    if _is_in_season_map_pool_lock_window(season_info, now_dt, season_end_iso):
+        return _new_learning_map_pool_state(
+            season_key,
+            season_end_iso,
+            current,
+            next_entry,
+            now_ts,
+            "临近赛季更新，排位地图池重新确认中，仅显示 API 当前/下一张",
+        )
+
+    if (
+        current_state.season_key
+        and season_key
+        and current_state.season_key != season_key
+    ):
+        return _new_learning_map_pool_state(
+            season_key,
+            season_end_iso,
+            current,
+            next_entry,
+            now_ts,
+            "赛季已变化，排位地图池重新学习中，仅显示 API 当前/下一张",
+        )
+
+    if current_state.status == "confirmed" and len(current_state.cycle) >= 3:
+        if _daily_map_pair_matches_cycle(current_state.cycle, current_name, next_name):
+            return DailyMapPoolState(
+                season_key=season_key,
+                season_end_iso=season_end_iso,
+                status="confirmed",
+                cycle=list(current_state.cycle),
+                last_current=current_name,
+                last_next=next_name,
+                last_current_start=int(current.start_timestamp or 0),
+                updated_at=now_ts,
+                reason="API 已确认排位地图池闭环",
+            )
+        return _new_learning_map_pool_state(
+            season_key,
+            season_end_iso,
+            current,
+            next_entry,
+            now_ts,
+            "API 轮换显示地图池变化，重新学习中，仅显示 API 当前/下一张",
+        )
+
+    if _is_same_api_pair(current_state, current, next_entry):
+        current_state.season_key = season_key
+        current_state.season_end_iso = season_end_iso
+        current_state.updated_at = now_ts
+        if not current_state.reason:
+            current_state.reason = "新赛季地图池学习中，仅显示 API 当前/下一张"
+        return current_state
+
+    cycle = _advance_learning_map_cycle(
+        list(current_state.cycle),
+        current_name,
+        next_name,
+    )
+    status = "confirmed" if _learning_cycle_is_closed(cycle, current_name, next_name) else "learning"
+    reason = (
+        "API 已确认排位地图池闭环"
+        if status == "confirmed"
+        else "新赛季地图池学习中，仅显示 API 当前/下一张"
+    )
+    return DailyMapPoolState(
+        season_key=season_key,
+        season_end_iso=season_end_iso,
+        status=status,
+        cycle=cycle,
+        last_current=current_name,
+        last_next=next_name,
+        last_current_start=int(current.start_timestamp or 0),
+        updated_at=now_ts,
+        reason=reason,
+    )
+
+
+def build_daily_map_entries_from_pool_state(
+    state: DailyMapPoolState | dict[str, Any] | None,
+    current: MapRotationEntry | None,
+    next_entry: MapRotationEntry | None,
+    hours: int = 24,
+) -> tuple[list[MapScheduleEntry], str]:
+    pool_state = (
+        state
+        if isinstance(state, DailyMapPoolState)
+        else DailyMapPoolState.from_dict(state)
+    )
+    anchors = [
+        _schedule_entry_from_rotation_entry(item)
+        for item in (current, next_entry)
+        if item is not None
+    ]
+    anchors = [item for item in anchors if item.start_timestamp and item.end_timestamp]
+
+    if (
+        pool_state.status == "confirmed"
+        and len(pool_state.cycle) >= 3
+        and current is not None
+        and next_entry is not None
+    ):
+        entries = build_rolling_map_entries_from_cycle(
+            pool_state.cycle,
+            current,
+            next_entry,
+            hours=hours,
+        )
+        if entries:
+            return (
+                entries,
+                "API 已确认排位地图池闭环，当前/下一张为 API，后续按已确认地图池推断",
+            )
+        return (
+            _dedupe_schedule_entries(anchors),
+            "API 轮换与已确认地图池不一致，仅显示 API 当前/下一张",
+        )
+
+    note = pool_state.reason or "新赛季地图池学习中，仅显示 API 当前/下一张"
+    if "仅显示 API 当前/下一张" not in note:
+        note = f"{note}，仅显示 API 当前/下一张"
+    return (_dedupe_schedule_entries(anchors), note)
+
+
+def build_rolling_map_entries_from_cycle(
+    cycle: list[str],
+    current: MapRotationEntry,
+    next_entry: MapRotationEntry,
+    hours: int = 24,
+) -> list[MapScheduleEntry]:
+    normalized_cycle = _dedupe_map_cycle(cycle)
+    if len(normalized_cycle) < 3:
+        return []
+    if not _daily_map_pair_matches_cycle(
+        normalized_cycle, current.map_name, next_entry.map_name
+    ):
+        return []
+
+    duration = _rotation_duration_seconds(current) or _rotation_duration_seconds(next_entry)
+    if duration <= 0 or not current.start_timestamp:
+        return []
+
+    window_end = int(current.start_timestamp) + max(1, int(hours)) * 60 * 60
+    entries: list[MapScheduleEntry] = []
+    current_index = _map_index_in_cycle(normalized_cycle, current.map_name)
+    if current_index < 0:
+        return []
+
+    start = int(current.start_timestamp)
+    index = current_index
+    while start < window_end:
+        map_name = normalized_cycle[index % len(normalized_cycle)]
+        end = start + duration
+        source = "inferred"
+        if _same_map_name(map_name, current.map_name) and abs(start - int(current.start_timestamp)) <= 60:
+            end = int(current.end_timestamp or end)
+            source = "api"
+        elif _same_map_name(map_name, next_entry.map_name) and abs(start - int(next_entry.start_timestamp or 0)) <= 60:
+            end = int(next_entry.end_timestamp or end)
+            source = "api"
+        entries.append(_make_map_schedule_entry(map_name, start, end, source=source))
+        start = end
+        index += 1
+    return _dedupe_schedule_entries(entries)
+
+
 def build_daily_map_entries_from_api(
     entries: list[MapScheduleEntry],
     day_ref: datetime | None = None,
@@ -1020,7 +1307,7 @@ def build_daily_map_entries_from_api(
         merged = _merge_api_anchor_entries(calibrated_entries, anchors)
         return (
             build_rolling_map_entries(merged, current.start_timestamp),
-            "API 校准当前/下一张，后续按排位网页地图池推断",
+            "API 已确认当前/下一张，后续为网页地图池推断，赛季换池时仅供参考",
         )
 
     if anchors:
@@ -1055,11 +1342,12 @@ def build_rolling_map_entries(
         expanded = _expand_schedule_to_bounds(
             expanded, cycle, duration_secs, window_start, window_end
         )
-    return [
+    rolling = [
         entry
         for entry in _dedupe_schedule_entries(expanded)
         if _entry_end_dt(entry) > window_start and _entry_start_dt(entry) < window_end
     ]
+    return [_mark_schedule_entry_source(entry, "inferred") for entry in rolling]
 
 
 def _calibrate_schedule_entries_with_api(
@@ -1071,26 +1359,26 @@ def _calibrate_schedule_entries_with_api(
     if not ordered or current is None or not current.start_timestamp:
         return ordered, False
 
-    best_offset: int | None = None
-    for index, entry in enumerate(ordered):
-        if not _same_map_name(entry.map_name, current.map_name):
-            continue
-        offset = int(current.start_timestamp) - int(entry.start_timestamp)
-        if not _schedule_entry_matches_api(entry, current, offset):
-            continue
-        if next_entry is not None and next_entry.start_timestamp:
-            if index + 1 >= len(ordered):
-                continue
-            if not _schedule_entry_matches_api(ordered[index + 1], next_entry, offset):
-                continue
-        best_offset = offset
-        break
-
-    if best_offset is None:
+    first = ordered[0]
+    if not _same_map_name(first.map_name, current.map_name):
         return ordered, False
-    if best_offset == 0:
+
+    offset = int(current.start_timestamp) - int(first.start_timestamp)
+    if abs(offset) > MAX_DAILY_MAP_CALIBRATION_OFFSET_SECS:
+        return ordered, False
+
+    if not _schedule_entry_matches_api(first, current, offset):
+        return ordered, False
+
+    if next_entry is not None and next_entry.start_timestamp:
+        if len(ordered) < 2:
+            return ordered, False
+        if not _schedule_entry_matches_api(ordered[1], next_entry, offset):
+            return ordered, False
+
+    if offset == 0:
         return ordered, True
-    return [_shift_schedule_entry(entry, best_offset) for entry in ordered], True
+    return [_shift_schedule_entry(entry, offset) for entry in ordered], True
 
 
 def _schedule_entry_matches_api(
@@ -1126,6 +1414,18 @@ def _shift_schedule_entry(entry: MapScheduleEntry, offset: int) -> MapScheduleEn
         entry.map_name,
         int(entry.start_timestamp) + int(offset),
         int(entry.end_timestamp) + int(offset),
+        source=entry.source,
+    )
+
+
+def _mark_schedule_entry_source(entry: MapScheduleEntry, source: str) -> MapScheduleEntry:
+    if entry.source == "api":
+        return entry
+    return _make_map_schedule_entry(
+        entry.map_name,
+        int(entry.start_timestamp),
+        int(entry.end_timestamp),
+        source=source,
     )
 
 
@@ -1138,6 +1438,7 @@ def _schedule_entry_from_rotation_entry(
         entry.map_name,
         int(entry.start_timestamp),
         int(entry.end_timestamp),
+        source="api",
     )
 
 
@@ -1163,6 +1464,138 @@ def _merge_api_anchor_entries(
     return _dedupe_schedule_entries(merged)
 
 
+def _new_learning_map_pool_state(
+    season_key: str,
+    season_end_iso: str,
+    current: MapRotationEntry,
+    next_entry: MapRotationEntry,
+    updated_at: int,
+    reason: str,
+) -> DailyMapPoolState:
+    return DailyMapPoolState(
+        season_key=season_key,
+        season_end_iso=season_end_iso,
+        status="learning",
+        cycle=_dedupe_map_cycle([current.map_name, next_entry.map_name]),
+        last_current=str(current.map_name or ""),
+        last_next=str(next_entry.map_name or ""),
+        last_current_start=int(current.start_timestamp or 0),
+        updated_at=updated_at,
+        reason=reason,
+    )
+
+
+def _daily_map_season_key(season_info: SeasonInfo | None) -> str:
+    if season_info is None:
+        return ""
+    if season_info.season_number is not None:
+        name = str(season_info.season_name or "").strip()
+        return f"S{season_info.season_number}:{name}"
+    if season_info.start_iso or season_info.end_iso:
+        return f"{season_info.start_iso}:{season_info.end_iso}"
+    return ""
+
+
+def _is_in_season_map_pool_lock_window(
+    season_info: SeasonInfo | None,
+    now: datetime | None = None,
+    fallback_end_iso: str = "",
+) -> bool:
+    end_iso = (
+        str(season_info.end_iso or "")
+        if season_info is not None and season_info.end_iso
+        else str(fallback_end_iso or "")
+    )
+    if not end_iso:
+        return False
+    end_dt = _parse_iso_datetime(end_iso)
+    now_dt = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
+    if end_dt is None:
+        return False
+    window_start = end_dt - timedelta(seconds=SEASON_MAP_POOL_LOCK_BEFORE_END_SECS)
+    window_end = end_dt + timedelta(seconds=SEASON_MAP_POOL_LOCK_AFTER_END_SECS)
+    return window_start <= now_dt <= window_end
+
+
+def _is_same_api_pair(
+    state: DailyMapPoolState,
+    current: MapRotationEntry,
+    next_entry: MapRotationEntry,
+) -> bool:
+    if not state.last_current_start or state.last_current_start != int(current.start_timestamp or 0):
+        return False
+    return _same_map_name(state.last_current, current.map_name) and _same_map_name(
+        state.last_next, next_entry.map_name
+    )
+
+
+def _advance_learning_map_cycle(
+    cycle: list[str], current_name: str, next_name: str
+) -> list[str]:
+    current_cycle = _dedupe_map_cycle(cycle)
+    if len(current_cycle) < 2:
+        return _dedupe_map_cycle([current_name, next_name])
+
+    if _same_map_name(current_cycle[-1], current_name):
+        if _same_map_name(current_cycle[0], next_name) and len(current_cycle) >= 3:
+            return current_cycle
+        if not any(_same_map_name(item, next_name) for item in current_cycle):
+            return [*current_cycle, next_name]
+        return _dedupe_map_cycle([current_name, next_name])
+
+    if _daily_map_pair_matches_cycle(current_cycle, current_name, next_name):
+        return current_cycle
+
+    return _dedupe_map_cycle([current_name, next_name])
+
+
+def _learning_cycle_is_closed(
+    cycle: list[str], current_name: str, next_name: str
+) -> bool:
+    return (
+        len(cycle) >= 3
+        and _same_map_name(cycle[-1], current_name)
+        and _same_map_name(cycle[0], next_name)
+    )
+
+
+def _daily_map_pair_matches_cycle(
+    cycle: list[str], current_name: str, next_name: str
+) -> bool:
+    index = _map_index_in_cycle(cycle, current_name)
+    if index < 0 or not cycle:
+        return False
+    expected_next = cycle[(index + 1) % len(cycle)]
+    return _same_map_name(expected_next, next_name)
+
+
+def _map_index_in_cycle(cycle: list[str], map_name: str) -> int:
+    for index, item in enumerate(cycle):
+        if _same_map_name(item, map_name):
+            return index
+    return -1
+
+
+def _dedupe_map_cycle(cycle: list[str]) -> list[str]:
+    result: list[str] = []
+    for item in cycle:
+        name = str(item or "").strip()
+        if not name:
+            continue
+        if any(_same_map_name(existing, name) for existing in result):
+            continue
+        result.append(name)
+    return result
+
+
+def _rotation_duration_seconds(entry: MapRotationEntry | None) -> int:
+    if entry is None:
+        return 0
+    if entry.start_timestamp and entry.end_timestamp:
+        return max(0, int(entry.end_timestamp) - int(entry.start_timestamp))
+    return int(entry.duration_secs or 0)
+
+
 def format_schedule_remaining(
     entry: MapScheduleEntry, now: datetime | None = None
 ) -> str:
@@ -1181,7 +1614,10 @@ def format_schedule_remaining(
 
 
 def _make_map_schedule_entry(
-    map_name: str, start_timestamp: int, end_timestamp: int
+    map_name: str,
+    start_timestamp: int,
+    end_timestamp: int,
+    source: str = "web",
 ) -> MapScheduleEntry:
     duration_secs = max(0, int(end_timestamp) - int(start_timestamp))
     code = _map_code_from_name(map_name)
@@ -1195,6 +1631,7 @@ def _make_map_schedule_entry(
         duration_secs=duration_secs,
         asset=f"https://apexlegendsstatus.com/assets/maps/{code}.png" if code else "",
         code=code,
+        source=source,
     )
 
 
@@ -1214,7 +1651,9 @@ def _expand_schedule_to_bounds(
             break
         prev_end = first.start_timestamp
         prev_start = prev_end - duration_secs
-        expanded.insert(0, _make_map_schedule_entry(prev_name, prev_start, prev_end))
+        expanded.insert(
+            0, _make_map_schedule_entry(prev_name, prev_start, prev_end, source="inferred")
+        )
 
     while expanded and _entry_end_dt(expanded[-1]) < day_end:
         last = expanded[-1]
@@ -1223,7 +1662,9 @@ def _expand_schedule_to_bounds(
             break
         next_start = last.end_timestamp
         next_end = next_start + duration_secs
-        expanded.append(_make_map_schedule_entry(next_name, next_start, next_end))
+        expanded.append(
+            _make_map_schedule_entry(next_name, next_start, next_end, source="inferred")
+        )
 
     return _dedupe_schedule_entries(expanded)
 
