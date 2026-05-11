@@ -1237,6 +1237,25 @@ def build_daily_map_entries_from_pool_state(
             "API 轮换与已确认地图池不一致，仅显示 API 当前/下一张",
         )
 
+    if (
+        pool_state.status == "learning"
+        and len(pool_state.cycle) >= 2
+        and current is not None
+        and next_entry is not None
+        and _learning_map_pool_allows_tentative_forecast(pool_state)
+    ):
+        entries = build_tentative_map_entries_from_cycle(
+            pool_state.cycle,
+            current,
+            next_entry,
+            hours=hours,
+        )
+        if len(entries) > len(anchors):
+            return (
+                entries,
+                "地图池仍在学习中，当前/下一张为 API，后续按已观测顺序临时推测，可能随 API 下一次校正",
+            )
+
     note = pool_state.reason or "新赛季地图池学习中，仅显示 API 当前/下一张"
     if "仅显示 API 当前/下一张" not in note:
         note = f"{note}，仅显示 API 当前/下一张"
@@ -1251,6 +1270,48 @@ def build_rolling_map_entries_from_cycle(
 ) -> list[MapScheduleEntry]:
     normalized_cycle = _dedupe_map_cycle(cycle)
     if len(normalized_cycle) < 3:
+        return []
+    if not _daily_map_pair_matches_cycle(
+        normalized_cycle, current.map_name, next_entry.map_name
+    ):
+        return []
+
+    duration = _rotation_duration_seconds(current) or _rotation_duration_seconds(next_entry)
+    if duration <= 0 or not current.start_timestamp:
+        return []
+
+    window_end = int(current.start_timestamp) + max(1, int(hours)) * 60 * 60
+    entries: list[MapScheduleEntry] = []
+    current_index = _map_index_in_cycle(normalized_cycle, current.map_name)
+    if current_index < 0:
+        return []
+
+    start = int(current.start_timestamp)
+    index = current_index
+    while start < window_end:
+        map_name = normalized_cycle[index % len(normalized_cycle)]
+        end = start + duration
+        source = "inferred"
+        if _same_map_name(map_name, current.map_name) and abs(start - int(current.start_timestamp)) <= 60:
+            end = int(current.end_timestamp or end)
+            source = "api"
+        elif _same_map_name(map_name, next_entry.map_name) and abs(start - int(next_entry.start_timestamp or 0)) <= 60:
+            end = int(next_entry.end_timestamp or end)
+            source = "api"
+        entries.append(_make_map_schedule_entry(map_name, start, end, source=source))
+        start = end
+        index += 1
+    return _dedupe_schedule_entries(entries)
+
+
+def build_tentative_map_entries_from_cycle(
+    cycle: list[str],
+    current: MapRotationEntry,
+    next_entry: MapRotationEntry,
+    hours: int = 24,
+) -> list[MapScheduleEntry]:
+    normalized_cycle = _dedupe_map_cycle(cycle)
+    if len(normalized_cycle) < 2:
         return []
     if not _daily_map_pair_matches_cycle(
         normalized_cycle, current.map_name, next_entry.map_name
@@ -1485,6 +1546,18 @@ def _new_learning_map_pool_state(
     )
 
 
+def _learning_map_pool_allows_tentative_forecast(pool_state: DailyMapPoolState) -> bool:
+    reason = str(pool_state.reason or "")
+    blocked_tokens = (
+        "临近赛季更新",
+        "赛季已变化",
+        "地图池变化",
+        "未返回完整",
+        "名称缺失",
+    )
+    return not any(token in reason for token in blocked_tokens)
+
+
 def _daily_map_season_key(season_info: SeasonInfo | None) -> str:
     if season_info is None:
         return ""
@@ -1545,6 +1618,13 @@ def _advance_learning_map_cycle(
 
     if _daily_map_pair_matches_cycle(current_cycle, current_name, next_name):
         return current_cycle
+
+    if (
+        len(current_cycle) >= 2
+        and _same_map_name(current_cycle[0], next_name)
+        and not any(_same_map_name(item, current_name) for item in current_cycle)
+    ):
+        return [*current_cycle, current_name]
 
     return _dedupe_map_cycle([current_name, next_name])
 

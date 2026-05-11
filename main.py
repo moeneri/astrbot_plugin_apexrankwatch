@@ -146,6 +146,7 @@ class Main(Star):
     _PREDATOR_GREEN = (88, 210, 126, 255)
     _PREDATOR_DEEP_RED = (158, 31, 36, 255)
     _PREDATOR_NEUTRAL = (246, 241, 232, 255)
+    _DAILY_MAP_LEARNING_INTERVAL_SECONDS = 60 * 60
 
     _KEYWORD_COMMAND_BLOCKLIST = {
         # 英文指令
@@ -225,8 +226,10 @@ class Main(Star):
 
         self._stop_event = asyncio.Event()
         self._poll_task = None
+        self._daily_map_learning_task = None
         self._poll_concurrency = 5
         self._poll_semaphore = asyncio.Semaphore(self._poll_concurrency)
+        self._daily_map_refresh_lock = asyncio.Lock()
         self._runtime_started = False
 
         logger.info(
@@ -243,6 +246,12 @@ class Main(Star):
             self._poll_task.cancel()
             try:
                 await self._poll_task
+            except asyncio.CancelledError:
+                pass
+        if self._daily_map_learning_task:
+            self._daily_map_learning_task.cancel()
+            try:
+                await self._daily_map_learning_task
             except asyncio.CancelledError:
                 pass
         await self._api.close()
@@ -273,6 +282,7 @@ class Main(Star):
             return
         self._runtime_started = True
         self._ensure_poll_task()
+        self._ensure_daily_map_learning_task()
 
     def _ensure_poll_task(self) -> bool:
         if self._poll_task and not self._poll_task.done():
@@ -290,6 +300,59 @@ class Main(Star):
             return False
         self._poll_task = loop.create_task(self._poll_loop())
         return True
+
+    def _ensure_daily_map_learning_task(self) -> bool:
+        if self._daily_map_learning_task and not self._daily_map_learning_task.done():
+            return True
+        if self._daily_map_learning_task and self._daily_map_learning_task.done():
+            try:
+                exc = self._daily_map_learning_task.exception()
+            except asyncio.CancelledError:
+                exc = None
+            if exc:
+                logger.error(f"全天地图学习任务异常退出，正在重建任务: {exc}")
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        self._daily_map_learning_task = loop.create_task(self._daily_map_learning_loop())
+        return True
+
+    async def _refresh_daily_map_schedule(self) -> DailyMapScheduleInfo | None:
+        if not self._config.api_key:
+            return None
+
+        async with self._daily_map_refresh_lock:
+            season_info = None
+            try:
+                season_info = await self._api.fetch_current_season_info()
+            except Exception as exc:
+                logger.warning(f"全天地图赛季信息获取失败，将仅使用 API 轮换学习状态: {exc}")
+
+            schedule = await self._api.fetch_daily_map_schedule(
+                "ranked",
+                pool_state=self._daily_map_pool_state,
+                season_info=season_info,
+            )
+            if schedule.pool_state is not None:
+                previous_status = self._daily_map_pool_state.status
+                self._daily_map_pool_state = schedule.pool_state
+                self._save_daily_map_pool_state()
+                if previous_status != self._daily_map_pool_state.status:
+                    logger.info(
+                        f"全天地图学习状态更新: {previous_status} -> {self._daily_map_pool_state.status}"
+                    )
+                elif self._config.debug_logging:
+                    logger.debug(f"全天地图学习刷新: {schedule.source_note}")
+            return schedule
+
+    async def _daily_map_learning_tick(self) -> bool:
+        if not self._config.api_key:
+            return False
+        if self._daily_map_pool_state.status == "confirmed":
+            return False
+        schedule = await self._refresh_daily_map_schedule()
+        return schedule is not None
 
     @staticmethod
     def _normalize_settings_list(value, lowercase: bool = True) -> set[str]:
@@ -1017,21 +1080,11 @@ class Main(Star):
             yield self._plain(event, self._missing_api_key_text())
             return
 
-        season_info = None
         try:
-            season_info = await self._api.fetch_current_season_info()
-        except Exception as exc:
-            logger.warning(f"全天地图赛季信息获取失败，将仅使用 API 轮换学习状态: {exc}")
-
-        try:
-            schedule = await self._api.fetch_daily_map_schedule(
-                "ranked",
-                pool_state=self._daily_map_pool_state,
-                season_info=season_info,
-            )
-            if schedule.pool_state is not None:
-                self._daily_map_pool_state = schedule.pool_state
-                self._save_daily_map_pool_state()
+            schedule = await self._refresh_daily_map_schedule()
+            if schedule is None:
+                yield self._plain(event, self._missing_api_key_text())
+                return
         except Exception as exc:
             logger.error(f"全天地图查询失败: {exc}")
             yield self._plain(event, self._api_request_failed_text("全天地图查询"))
@@ -1655,6 +1708,22 @@ class Main(Star):
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(), timeout=self._config.check_interval * 60
+                )
+            except asyncio.TimeoutError:
+                continue
+
+    async def _daily_map_learning_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                await self._daily_map_learning_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"全天地图学习任务执行失败: {exc}")
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=self._DAILY_MAP_LEARNING_INTERVAL_SECONDS,
                 )
             except asyncio.TimeoutError:
                 continue
