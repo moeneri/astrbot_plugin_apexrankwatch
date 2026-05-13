@@ -22,21 +22,21 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 
 | 命令 | 说明 |
 | --- | --- |
-| `/apexhelp` | 查看帮助 |
-| `/apextest` | 测试插件和主动消息能力 |
-| `/apexrank <玩家名\|uid:...> [平台]` | 查询玩家段位信息 |
-| `/apexrankwatch <玩家名\|uid:...> [平台]` | 将玩家加入当前群监控 |
-| `/apexranklist` | 查看当前群监控列表 |
-| `/apexrankremove <玩家名\|uid:...> [平台]` | 从当前群移除玩家监控 |
-| `/map` | 查询排位地图轮换 |
-| `/全天地图` | 查询 API 学习确认的排位未来 24 小时地图 |
-| `/匹配地图` | 查询三人赛匹配地图轮换 |
-| `/apexseason` | 查询当前赛季信息 |
-| `/apexpredator [平台]` | 查询猎杀线和大师数量 |
-| `/apexblacklist <add\|remove\|list\|clear> <玩家ID>` | 管理玩家黑名单 |
-| `/apex_download` | 检测中文字体状态，并在缺少字体时下载插件字体缓存 |
-| `/赛季关闭` | 关闭当前群的“赛季”关键词自动回复 |
-| `/赛季开启` | 开启当前群的“赛季”关键词自动回复 |
+| `📋 /apexhelp` | 查看帮助 |
+| `✅ /apextest` | 测试插件和主动消息能力 |
+| `🔎 /apexrank <玩家名\|uid:...> [平台]` | 查询玩家段位信息 |
+| `➕ /apexrankwatch <玩家名\|uid:...> [平台]` | 将玩家加入当前群监控 |
+| `📋 /apexranklist` | 查看当前群监控列表 |
+| `➖ /apexrankremove <玩家名\|uid:...> [平台]` | 从当前群移除玩家监控 |
+| `🗺️ /map` | 查询排位地图轮换 |
+| `🕘 /全天地图` | 查询 API 学习确认的排位未来 24 小时地图 |
+| `🌍 /匹配地图` | 查询三人赛匹配地图轮换 |
+| `🗓️ /apexseason` | 查询当前赛季信息 |
+| `🏆 /apexpredator [平台]` | 查询猎杀线和大师数量 |
+| `🚫 /apexblacklist <add\|remove\|list\|clear> <玩家ID>` | 管理玩家黑名单 |
+| `🧩 /apex_download` | 检测中文字体状态，并在缺少字体时下载插件字体缓存 |
+| `🔁 /赛季关闭` | 关闭当前群的“赛季”关键词自动回复 |
+| `🔁 /赛季开启` | 开启当前群的“赛季”关键词自动回复 |
 
 ## 常用别名
 
@@ -92,6 +92,7 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 | `data_dir` | 空 | 自定义数据目录，留空使用 AstrBot 默认目录 |
 | `font_auto_download` | `true` | Linux/Docker 缺少中文字体时自动下载字体缓存 |
 | `font_download_url` | 空 | 自定义中文字体下载地址，留空使用官方资源仓库 |
+| `output_mode` | `image` | 输出模式，`image` 为图片模式，`text` 为文字模式 |
 
 ## 注意事项
 

@@ -95,9 +95,13 @@ class PluginConfig:
     data_dir: str
     font_auto_download: bool
     font_download_url: str
+    output_mode: str
 
     @staticmethod
     def from_raw(raw) -> "PluginConfig":
+        output_mode = str(raw.get("output_mode", "image")).strip().lower()
+        if output_mode not in {"image", "text"}:
+            output_mode = "image"
         return PluginConfig(
             api_key=str(raw.get("api_key", "")).strip(),
             debug_logging=coerce_bool(raw.get("debug_logging", False), False),
@@ -115,6 +119,7 @@ class PluginConfig:
             data_dir=str(raw.get("data_dir", "")).strip(),
             font_auto_download=coerce_bool(raw.get("font_auto_download", True), True),
             font_download_url=str(raw.get("font_download_url", "")).strip(),
+            output_mode=output_mode,
         )
 
 
@@ -590,6 +595,12 @@ class Main(Star):
                 return event.chain_result([Comp.Reply(id=reply_id), image])
         return event.chain_result([image])
 
+    def _is_text_output_mode(self) -> bool:
+        return str(getattr(self._config, "output_mode", "image") or "image").lower() == "text"
+
+    def _is_image_output_mode(self) -> bool:
+        return not self._is_text_output_mode()
+
     @staticmethod
     def _parse_list(raw: str) -> set[str]:
         return _split_csv(raw)
@@ -952,6 +963,9 @@ class Main(Star):
             return
 
         lines = self._build_apex_help_lines()
+        if self._is_text_output_mode():
+            yield self._plain(event, "\n".join(lines))
+            return
         try:
             image_path = self._render_apex_help_image()
             yield self._image(event, image_path)
@@ -1047,6 +1061,9 @@ class Main(Star):
             return
 
         player_data.platform = used_platform
+        if self._is_text_output_mode():
+            yield self._plain(event, self._format_player_rank_text(player_data))
+            return
         try:
             image_path = self._render_player_rank_image(player_data)
             yield self._image(event, image_path)
@@ -1077,6 +1094,9 @@ class Main(Star):
             yield self._plain(event, self._api_request_failed_text("地图轮换查询"))
             return
 
+        if self._is_text_output_mode():
+            yield self._plain(event, self._format_map_rotation_text(rotation_info))
+            return
         try:
             image_path = self._render_map_rotation_image(rotation_info)
             yield self._image(event, image_path)
@@ -1107,6 +1127,12 @@ class Main(Star):
             yield self._plain(event, self._api_request_failed_text("匹配地图轮换查询"))
             return
 
+        if self._is_text_output_mode():
+            yield self._plain(
+                event,
+                self._format_map_rotation_text(rotation_info, mode="battle_royale"),
+            )
+            return
         try:
             image_path = self._render_map_rotation_image(
                 rotation_info, mode="battle_royale"
@@ -1154,6 +1180,9 @@ class Main(Star):
             )
             return
 
+        if self._is_text_output_mode():
+            yield self._plain(event, self._format_daily_map_schedule_text(schedule))
+            return
         try:
             image_path = self._render_daily_map_schedule_image(schedule)
             yield self._image(event, image_path)
@@ -1201,6 +1230,11 @@ class Main(Star):
             yield self._plain(event, self._api_request_failed_text("猎杀线查询"))
             return
 
+        if self._is_text_output_mode():
+            yield self._plain(
+                event, self._format_predator_info_text(predator_info, selected_platform)
+            )
+            return
         try:
             image_path = self._render_predator_info_image(predator_info)
             yield self._image(event, image_path)
@@ -1236,6 +1270,9 @@ class Main(Star):
             )
             return
 
+        if self._is_text_output_mode():
+            yield self._plain(event, self._format_season_info(season_info))
+            return
         try:
             image_path = self._render_season_info_image(season_info)
             yield self._image(event, image_path)
@@ -1279,6 +1316,11 @@ class Main(Star):
             logger.error(f"赛季时间查询失败: {exc}")
             return
 
+        if self._is_text_output_mode():
+            yield self._plain(event, self._format_season_info(season_info))
+            if group_id:
+                yield self._plain(event, "🔃 关闭赛季关键词回复：/赛季关闭")
+            return
         try:
             image_path = self._render_season_info_image(season_info)
             yield self._image(event, image_path)
@@ -1463,6 +1505,9 @@ class Main(Star):
                 f"🏆 当前排名: {self._get_rank_display_text(player_data)}",
             ]
         )
+        if self._is_text_output_mode():
+            yield self._plain(event, success_text)
+            return
         try:
             image_path = self._render_monitor_added_image(player_data, normalized_platform)
             yield self._image(event, image_path)
@@ -1496,6 +1541,9 @@ class Main(Star):
             return
 
         response_lines = self._build_rank_watch_list_lines(group.players.values())
+        if self._is_text_output_mode():
+            yield self._plain(event, "\n".join(response_lines))
+            return
         try:
             image_path = self._render_rank_watch_list_image(group.players.values())
             yield self._image(event, image_path)
@@ -1989,19 +2037,20 @@ class Main(Star):
 
                 if result.group_origin:
                     sent_image = False
-                    try:
-                        image_path = self._render_rank_change_image(
-                            player_data=player_data,
-                            old_score=old_score,
-                            new_score=new_score,
-                            platform=platform,
-                            is_season_reset=is_season_reset,
-                        )
-                        sent_image = await self._send_active_image(
-                            result.group_origin, image_path
-                        )
-                    except Exception as exc:
-                        logger.error(f"排位分数变化图片生成失败，已回退文字通知: {exc}")
+                    if self._is_image_output_mode():
+                        try:
+                            image_path = self._render_rank_change_image(
+                                player_data=player_data,
+                                old_score=old_score,
+                                new_score=new_score,
+                                platform=platform,
+                                is_season_reset=is_season_reset,
+                            )
+                            sent_image = await self._send_active_image(
+                                result.group_origin, image_path
+                            )
+                        except Exception as exc:
+                            logger.error(f"排位分数变化图片生成失败，已回退文字通知: {exc}")
                     if not sent_image:
                         await self._send_active_message(
                             result.group_origin, "\n".join(message_lines)
@@ -2070,26 +2119,26 @@ class Main(Star):
             "📋 Apex Rank Watch 帮助（/apexhelp 或 /apex帮助）",
             "——",
             "【查询】",
-            "/apexrank <玩家|uid:...> [平台]  别名：/apex查询 /视奸",
+            "🔎 /apexrank <玩家|uid:...> [平台]  别名：/apex查询 /视奸",
             "例：/apexrank PlayerName pc",
             "——",
             "【监控（群聊）】",
-            "/apexrankwatch <玩家|uid:...> [平台]  别名：/apex监控 /持续视奸",
-            "/apexranklist  别名：/apex列表",
-            "/apexrankremove <玩家|uid:...> [平台]  别名：/apex移除 /取消持续视奸",
+            "➕ /apexrankwatch <玩家|uid:...> [平台]  别名：/apex监控 /持续视奸",
+            "📋 /apexranklist  别名：/apex列表",
+            "➖ /apexrankremove <玩家|uid:...> [平台]  别名：/apex移除 /取消持续视奸",
             "——",
             "【信息】",
-            "/apexseason [赛季号]  别名：/apex赛季 /新赛季",
-            "/map  别名：/地图 /排位地图 /apexmap /apexrankmap（排位地图轮换）",
-            "/全天地图（API 学习确认排位未来 24 小时地图）",
-            "/匹配地图（三人赛地图轮换）",
-            "/apexpredator [平台]  别名：/apex猎杀 /猎杀",
+            "🗓️ /apexseason [赛季号]  别名：/apex赛季 /新赛季",
+            "🗺️ /map  别名：/地图 /排位地图 /apexmap /apexrankmap（排位地图轮换）",
+            "🕘 /全天地图（API 学习确认排位未来 24 小时地图）",
+            "🌍 /匹配地图（三人赛地图轮换）",
+            "🏆 /apexpredator [平台]  别名：/apex猎杀 /猎杀",
             "例：/apexseason 28  或  /apexseason current",
             "关键词：消息包含「赛季」自动回复（/赛季关闭，/赛季开启）",
             "——",
             "【管理】",
-            "/apexblacklist <add|remove|list|clear> <玩家ID>  别名：/apex黑名单 /不准视奸 /apexban",
-            "/apex_download  检测中文字体并在缺失时下载字体缓存",
+            "🚫 /apexblacklist <add|remove|list|clear> <玩家ID>  别名：/apex黑名单 /不准视奸 /apexban",
+            "🧩 /apex_download  检测中文字体并在缺失时下载字体缓存",
             "——",
             "【参数】",
             "平台：PC / PS4 / X1 / SWITCH（默认 PC；PC 无数据自动尝试其他平台）",
@@ -2150,40 +2199,40 @@ class Main(Star):
                 (54, 250, 1068, 500),
                 "查询",
                 [
-                    ("/apexrank 玩家 [平台]", "查询玩家段位、分数、在线状态"),
-                    ("/apex查询 /视奸", "中文别名，默认 PC，支持 uid:"),
+                    ("🔎 /apexrank 玩家 [平台]", "查询玩家段位、分数、在线状态"),
+                    ("🔎 /apex查询 /视奸", "中文别名，默认 PC，支持 uid:"),
                 ],
             ),
             (
                 (54, 520, 1068, 900),
                 "监控",
                 [
-                    ("/apexrankwatch 玩家 [平台]", "添加群内持续监控"),
-                    ("/apexranklist /apex列表", "查看本群监控列表"),
-                    ("/apexrankremove 玩家 [平台] /取消持续视奸", "移除指定玩家监控"),
-                    ("/apex监控 /持续视奸", "添加监控中文别名"),
+                    ("➕ /apexrankwatch 玩家 [平台]", "添加群内持续监控"),
+                    ("📋 /apexranklist /apex列表", "查看本群监控列表"),
+                    ("➖ /apexrankremove 玩家 [平台] /取消持续视奸", "移除指定玩家监控"),
+                    ("➕ /apex监控 /持续视奸", "添加监控中文别名"),
                 ],
             ),
             (
                 (54, 920, 1068, 1370),
                 "信息",
                 [
-                    ("/map /地图 /排位地图", "排位地图轮换，默认输出图片"),
-                    ("/全天地图", "API 学习确认排位未来 24 小时地图"),
-                    ("/匹配地图", "三人赛地图轮换"),
-                    ("/apexpredator [平台] /apex猎杀 /猎杀", "大师数量与猎杀底分"),
-                    ("/apexseason /新赛季", "当前赛季结束时间"),
-                    ("赛季关键词", "群消息包含赛季时自动回复"),
+                    ("🗺️ /map /地图 /排位地图", "排位地图轮换，默认输出图片"),
+                    ("🕘 /全天地图", "API 学习确认排位未来 24 小时地图"),
+                    ("🌍 /匹配地图", "三人赛地图轮换"),
+                    ("🏆 /apexpredator [平台] /apex猎杀 /猎杀", "大师数量与猎杀底分"),
+                    ("🗓️ /apexseason /新赛季", "当前赛季结束时间"),
+                    ("🔁 赛季关键词", "群消息包含赛季时自动回复"),
                 ],
             ),
             (
                 (54, 1390, 1068, 1680),
                 "管理",
                 [
-                    ("/apexblacklist add 玩家ID", "加入动态黑名单"),
-                    ("/apexblacklist list", "查看配置与动态黑名单"),
-                    ("/赛季关闭 /赛季开启", "管理本群赛季关键词回复"),
-                    ("/apex_download", "检测或下载中文字体缓存"),
+                    ("🚫 /apexblacklist add 玩家ID", "加入动态黑名单"),
+                    ("🚫 /apexblacklist list", "查看配置与动态黑名单"),
+                    ("🔁 /赛季关闭 /赛季开启", "管理本群赛季关键词回复"),
+                    ("🧩 /apex_download", "检测或下载中文字体缓存"),
                 ],
             ),
             (

@@ -87,5 +87,11 @@
     "type": "string",
     "hint": "留空使用官方资源仓库。自定义地址必须提供同一个字体文件，否则 SHA256 校验不会通过。",
     "default": ""
+  },
+  "output_mode": {
+    "description": "消息输出模式",
+    "type": "string",
+    "hint": "image 为图片模式，text 为文字模式。默认 image，适合 QQ 群图文展示；text 会用紧凑排版和 emoji 图标输出。",
+    "default": "image"
   }
 }
