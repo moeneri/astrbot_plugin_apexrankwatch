@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 from datetime import datetime, timezone
@@ -8,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import httpx
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 import astrbot.api.message_components as Comp
@@ -91,6 +93,8 @@ class PluginConfig:
     whitelist_groups: str
     allow_private: bool
     data_dir: str
+    font_auto_download: bool
+    font_download_url: str
 
     @staticmethod
     def from_raw(raw) -> "PluginConfig":
@@ -109,6 +113,8 @@ class PluginConfig:
             whitelist_groups=str(raw.get("whitelist_groups", "")).strip(),
             allow_private=coerce_bool(raw.get("allow_private", True), True),
             data_dir=str(raw.get("data_dir", "")).strip(),
+            font_auto_download=coerce_bool(raw.get("font_auto_download", True), True),
+            font_download_url=str(raw.get("font_download_url", "")).strip(),
         )
 
 
@@ -147,6 +153,16 @@ class Main(Star):
     _PREDATOR_DEEP_RED = (158, 31, 36, 255)
     _PREDATOR_NEUTRAL = (246, 241, 232, 255)
     _DAILY_MAP_LEARNING_INTERVAL_SECONDS = 60 * 60
+    _FONT_FILE_NAME = "NotoSansCJKsc-Regular.otf"
+    _FONT_SHA256 = (
+        "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b"
+    )
+    _FONT_DOWNLOAD_URL = (
+        "https://raw.githubusercontent.com/moeneri/apexrankwatch-assets/"
+        "font-v1/fonts/NotoSansCJKsc-Regular.otf"
+    )
+    _FONT_DOWNLOAD_TIMEOUT_SECONDS = 30
+    _FONT_MAX_BYTES = 25 * 1024 * 1024
 
     _KEYWORD_COMMAND_BLOCKLIST = {
         # 英文指令
@@ -4883,6 +4899,82 @@ class Main(Star):
         except Exception:
             return None
 
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _font_cache_path(self) -> Path:
+        data_dir = getattr(self, "_data_dir", None)
+        if data_dir is None:
+            data_dir = self._PLUGIN_ROOT / "_generated"
+        return Path(data_dir) / "fonts" / self._FONT_FILE_NAME
+
+    def _resolve_cached_cjk_font_path(self) -> Path | None:
+        font_path = self._font_cache_path()
+        if not font_path.exists():
+            return None
+        try:
+            if self._sha256_file(font_path).lower() == self._FONT_SHA256:
+                return font_path
+            font_path.unlink(missing_ok=True)
+            logger.warning("Apex Rank Watch 字体缓存校验失败，已删除损坏文件")
+        except Exception as exc:
+            logger.warning(f"Apex Rank Watch 字体缓存读取失败：{exc}")
+        return None
+
+    def _download_cjk_font_if_needed(self) -> Path | None:
+        cached_path = self._resolve_cached_cjk_font_path()
+        if cached_path is not None:
+            return cached_path
+
+        config = getattr(self, "_config", None)
+        if not getattr(config, "font_auto_download", True):
+            return None
+        if getattr(self, "_font_download_attempted", False):
+            return None
+        self._font_download_attempted = True
+
+        url = str(
+            getattr(config, "font_download_url", "") or self._FONT_DOWNLOAD_URL
+        ).strip()
+        if not url:
+            return None
+
+        font_path = self._font_cache_path()
+        temp_path = font_path.with_suffix(font_path.suffix + ".tmp")
+        try:
+            response = httpx.get(
+                url,
+                timeout=self._FONT_DOWNLOAD_TIMEOUT_SECONDS,
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+            content_length = response.headers.get("content-length")
+            if content_length and int(content_length) > self._FONT_MAX_BYTES:
+                raise ValueError("字体文件超过允许大小")
+            content = response.content
+            if len(content) > self._FONT_MAX_BYTES:
+                raise ValueError("字体文件超过允许大小")
+            if hashlib.sha256(content).hexdigest().lower() != self._FONT_SHA256:
+                raise ValueError("字体文件 SHA256 校验失败")
+
+            font_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path.write_bytes(content)
+            temp_path.replace(font_path)
+            logger.info(f"Apex Rank Watch 已下载中文字体缓存：{font_path}")
+            return font_path
+        except Exception as exc:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            logger.warning(f"Apex Rank Watch 中文字体下载失败，将使用系统兜底字体：{exc}")
+            return None
+
     def _font(self, size: int, bold: bool = False):
         candidates = [
             r"C:\Windows\Fonts\msyhbd.ttc" if bold else r"C:\Windows\Fonts\msyh.ttc",
@@ -4894,11 +4986,28 @@ class Main(Star):
             "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc"
             if bold
             else "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        ]
+        for font_path in candidates:
+            try:
+                path = Path(font_path)
+                if path.exists():
+                    return ImageFont.truetype(str(path), size=size)
+            except Exception:
+                continue
+
+        downloaded_font = self._download_cjk_font_if_needed()
+        if downloaded_font is not None:
+            try:
+                return ImageFont.truetype(str(downloaded_font), size=size)
+            except Exception as exc:
+                logger.warning(f"Apex Rank Watch 中文字体加载失败：{exc}")
+
+        fallback_candidates = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
             if bold
             else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         ]
-        for font_path in candidates:
+        for font_path in fallback_candidates:
             try:
                 path = Path(font_path)
                 if path.exists():
