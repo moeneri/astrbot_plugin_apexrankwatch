@@ -16,7 +16,7 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 
 下图包含 `/新赛季`、`/猎杀`、`/地图`、`/apexrank moeneri` 和 `/apexrankwatch moeneri pc` 的常用输出效果。
 
-![常用命令效果总览](assets/readme/command_effects_overview.png)
+![常用命令效果总览](https://cdn.jsdelivr.net/gh/moeneri/astrbot_plugin_apexrankwatch@main/assets/readme/command_effects_overview.png)
 
 ## 命令
 

@@ -872,6 +872,7 @@ class Main(Star):
 
     @filter.command("apextest")
     async def apextest(self, event: AstrMessageEvent):
+        """测试插件运行状态和当前会话主动消息推送能力。"""
         deny = self._guard_access(event)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -909,11 +910,13 @@ class Main(Star):
 
     @filter.command("apexhelp", alias={"apex帮助"})
     async def apexhelp(self, event: AstrMessageEvent):
+        """查看 Apex Rank Watch 帮助与命令说明。"""
         async for result in self.apexrankhelp(event):
             yield result
 
     @filter.command("apexrankhelp")
     async def apexrankhelp(self, event: AstrMessageEvent):
+        """查看 Apex Rank Watch 帮助与命令说明。"""
         deny = self._guard_access(event)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -929,6 +932,7 @@ class Main(Star):
 
     @filter.command("apexrank")
     async def apexrank(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
+        """查询指定 Apex 玩家段位、分数、等级和在线状态，支持平台或 UID。"""
         deny = self._guard_access(event)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -1008,6 +1012,7 @@ class Main(Star):
 
     @filter.command("map", alias={"地图", "排位地图", "apexmap", "apexrankmap"})
     async def apexmap(self, event: AstrMessageEvent):
+        """查询当前排位地图轮换和下一张地图。"""
         deny = self._guard_access(event)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -1037,6 +1042,7 @@ class Main(Star):
 
     @filter.command("匹配地图")
     async def apexmatchmap(self, event: AstrMessageEvent):
+        """查询当前三人赛匹配地图轮换。"""
         deny = self._guard_access(event)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -1071,6 +1077,7 @@ class Main(Star):
 
     @filter.command("全天地图", alias={"全天排位地图", "今日地图", "今日排位地图", "dailymap"})
     async def apexdailymap(self, event: AstrMessageEvent):
+        """查询 API 学习确认的未来 24 小时排位地图排期。"""
         deny = self._guard_access(event)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -1112,6 +1119,7 @@ class Main(Star):
 
     @filter.command("apexpredator", alias={"apex猎杀", "猎杀"})
     async def apexpredator(self, event: AstrMessageEvent, platform: str = ""):
+        """查询大师数量、猎杀线和各平台排名概览。"""
         deny = self._guard_access(event)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -1160,6 +1168,7 @@ class Main(Star):
 
     @filter.command("apexseason")
     async def apexseason(self, event: AstrMessageEvent, season: str = ""):
+        """查询当前或指定 Apex 赛季结束时间。"""
         deny = self._guard_access(event)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -1234,6 +1243,7 @@ class Main(Star):
 
     @filter.command("赛季关闭")
     async def season_keyword_off(self, event: AstrMessageEvent):
+        """关闭本群“赛季”关键词自动回复。"""
         deny = self._guard_access(event, require_group=True)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -1257,6 +1267,7 @@ class Main(Star):
 
     @filter.command("赛季开启")
     async def season_keyword_on(self, event: AstrMessageEvent):
+        """开启本群“赛季”关键词自动回复。"""
         deny = self._guard_access(event, require_group=True)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -1280,6 +1291,7 @@ class Main(Star):
 
     @filter.command("apexrankwatch")
     async def apexrankwatch(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
+        """将玩家加入本群排位分数持续监控。"""
         deny = self._guard_access(event, require_group=True)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -1408,6 +1420,7 @@ class Main(Star):
 
     @filter.command("apexranklist")
     async def apexranklist(self, event: AstrMessageEvent):
+        """查看本群正在监控的 Apex 玩家列表。"""
         deny = self._guard_access(event, require_group=True)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -1440,6 +1453,7 @@ class Main(Star):
 
     @filter.command("apexrankremove")
     async def apexrankremove(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
+        """从本群移除指定玩家的排位监控。"""
         deny = self._guard_access(event, require_group=True)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -1507,6 +1521,7 @@ class Main(Star):
 
     @filter.command("apexblacklist")
     async def apexblacklist(self, event: AstrMessageEvent, action: str = "", player_name: str = ""):
+        """管理 Apex 玩家查询黑名单，支持 add、remove、list、clear。"""
         deny = self._guard_access(event)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -1633,67 +1648,80 @@ class Main(Star):
 
     @filter.command("apex监控")
     async def apexrankwatch_cn(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
+        """中文别名：将玩家加入本群排位分数持续监控。"""
         async for result in self.apexrankwatch(event, player_name, platform):
             yield result
 
     @filter.command("apex列表")
     async def apexranklist_cn(self, event: AstrMessageEvent):
+        """中文别名：查看本群正在监控的 Apex 玩家列表。"""
         async for result in self.apexranklist(event):
             yield result
 
     @filter.command("apex移除")
     async def apexrankremove_cn(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
+        """中文别名：从本群移除指定玩家的排位监控。"""
         async for result in self.apexrankremove(event, player_name, platform):
             yield result
 
     @filter.command("apex查询")
     async def apexrank_query_cn(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
+        """中文别名：查询指定 Apex 玩家段位、分数和在线状态。"""
         async for result in self.apexrank(event, player_name, platform):
             yield result
 
     @filter.command("视奸")
     async def apexrank_query_cn_alt(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
+        """中文别名：查询指定 Apex 玩家段位、分数和在线状态。"""
         async for result in self.apexrank(event, player_name, platform):
             yield result
 
     @filter.command("持续视奸")
     async def apexrankwatch_cn_alt(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
+        """中文别名：将玩家加入本群排位分数持续监控。"""
         async for result in self.apexrankwatch(event, player_name, platform):
             yield result
 
     @filter.command("取消持续视奸")
     async def apexrankremove_cn_alt(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
+        """中文别名：从本群移除指定玩家的排位监控。"""
         async for result in self.apexrankremove(event, player_name, platform):
             yield result
 
 
     @filter.command("apex赛季")
     async def apexseason_cn(self, event: AstrMessageEvent, season: str = ""):
+        """中文别名：查询当前或指定 Apex 赛季结束时间。"""
         async for result in self.apexseason(event, season):
             yield result
 
     @filter.command("新赛季")
     async def apexseason_new_cn(self, event: AstrMessageEvent, season: str = ""):
+        """中文别名：查询当前或指定 Apex 赛季结束时间。"""
         async for result in self.apexseason(event, season):
             yield result
 
     @filter.command("apex测试")
     async def apextest_cn(self, event: AstrMessageEvent):
+        """中文别名：测试插件运行状态和主动消息推送能力。"""
         async for result in self.apextest(event):
             yield result
 
     @filter.command("apex黑名单")
     async def apexblacklist_cn(self, event: AstrMessageEvent, action: str = "", player_name: str = ""):
+        """中文别名：管理 Apex 玩家查询黑名单。"""
         async for result in self.apexblacklist(event, action, player_name):
             yield result
 
     @filter.command("不准视奸")
     async def apexblacklist_cn_alt(self, event: AstrMessageEvent, action: str = "", player_name: str = ""):
+        """中文别名：管理 Apex 玩家查询黑名单。"""
         async for result in self.apexblacklist(event, action, player_name):
             yield result
 
     @filter.command("apexban")
     async def apexblacklist_en_alt(self, event: AstrMessageEvent, action: str = "", player_name: str = ""):
+        """管理 Apex 玩家查询黑名单的英文别名。"""
         async for result in self.apexblacklist(event, action, player_name):
             yield result
 
