@@ -34,6 +34,7 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 | `/apexseason` | 查询当前赛季信息 |
 | `/apexpredator [平台]` | 查询猎杀线和大师数量 |
 | `/apexblacklist <add\|remove\|list\|clear> <玩家ID>` | 管理玩家黑名单 |
+| `/apex_download` | 检测中文字体状态，并在缺少字体时下载插件字体缓存 |
 | `/赛季关闭` | 关闭当前群的“赛季”关键词自动回复 |
 | `/赛季开启` | 开启当前群的“赛季”关键词自动回复 |
 
@@ -60,6 +61,7 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 /全天地图
 /匹配地图
 /apexpredator pc
+/apex_download
 ```
 
 支持的平台参数：`pc`、`ps4`、`x1`、`switch`。不填写平台时，插件会按 PC、PS、Xbox、Switch 的顺序尝试查询。
@@ -99,6 +101,7 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 - 同名玩家可能在多个平台存在记录，建议在命令后显式填写平台。
 - 监控通知依赖 AstrBot 的主动消息能力；如果当前适配器不支持主动消息，查询命令仍可正常使用。
 - Linux/Docker 环境如果没有中文字体，插件会从 `moeneri/apexrankwatch-assets` 下载 Noto Sans CJK 字体到插件数据目录，并用 SHA256 校验后再加载；插件 zip 内不包含完整字体文件。
+- 第一次使用插件命令时如果检测不到中文字体，会先提示字体下载方式；也可以随时发送 `/apex_download` 手动检测和下载。
 
 ## 许可
 
