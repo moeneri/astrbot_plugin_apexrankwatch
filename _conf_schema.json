@@ -75,5 +75,17 @@
     "description": "数据存储目录（留空使用 AstrBot 默认插件数据目录）",
     "type": "string",
     "default": ""
+  },
+  "font_auto_download": {
+    "description": "是否在缺少中文字体时自动下载字体缓存",
+    "type": "bool",
+    "hint": "默认开启。字体会保存到插件数据目录，不会写入插件安装目录。",
+    "default": true
+  },
+  "font_download_url": {
+    "description": "自定义中文字体下载地址",
+    "type": "string",
+    "hint": "留空使用官方资源仓库。自定义地址必须提供同一个字体文件，否则 SHA256 校验不会通过。",
+    "default": ""
   }
 }

@@ -88,6 +88,8 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 | `whitelist_groups` | 空 | 允许使用插件的群 ID 列表 |
 | `allow_private` | `true` | 是否允许私聊使用查询命令 |
 | `data_dir` | 空 | 自定义数据目录，留空使用 AstrBot 默认目录 |
+| `font_auto_download` | `true` | Linux/Docker 缺少中文字体时自动下载字体缓存 |
+| `font_download_url` | 空 | 自定义中文字体下载地址，留空使用官方资源仓库 |
 
 ## 注意事项
 
@@ -96,6 +98,7 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 - 赛季结束时间来自公开倒计时页面，插件会统一按北京时间展示。
 - 同名玩家可能在多个平台存在记录，建议在命令后显式填写平台。
 - 监控通知依赖 AstrBot 的主动消息能力；如果当前适配器不支持主动消息，查询命令仍可正常使用。
+- Linux/Docker 环境如果没有中文字体，插件会从 `moeneri/apexrankwatch-assets` 下载 Noto Sans CJK 字体到插件数据目录，并用 SHA256 校验后再加载；插件 zip 内不包含完整字体文件。
 
 ## 许可
 
