@@ -118,6 +118,13 @@ class PluginConfig:
         )
 
 
+@dataclass(frozen=True)
+class FontStatus:
+    available: bool
+    source: str
+    path: Path | None
+
+
 @dataclass
 class PollFetchResult:
     group_id: str
@@ -178,6 +185,9 @@ class Main(Star):
         "dailymap",
         "apextest",
         "apexhelp",
+        "apex_download",
+        "apexdownload",
+        "apexfont",
         "apex帮助",
         "apexrankhelp",
         "apexblacklist",
@@ -201,6 +211,8 @@ class Main(Star):
         "apex赛季",
         "新赛季",
         "apex测试",
+        "apex字体",
+        "apex字体下载",
         "apex黑名单",
         "不准视奸",
         "apexban",
@@ -247,6 +259,7 @@ class Main(Star):
         self._poll_semaphore = asyncio.Semaphore(self._poll_concurrency)
         self._daily_map_refresh_lock = asyncio.Lock()
         self._runtime_started = False
+        self._font_notice_sent = False
 
         logger.info(
             f"Apex Rank Watch 已加载，检测间隔 {self._config.check_interval} 分钟"
@@ -946,6 +959,21 @@ class Main(Star):
             logger.error(f"帮助图片生成失败，已回退文字输出: {exc}")
             yield self._plain(event, "\n".join(lines))
 
+    @filter.command("apex_download", alias={"apexdownload", "apexfont", "apex字体", "apex字体下载"})
+    async def apex_download(self, event: AstrMessageEvent):
+        """检测中文字体状态，并在缺少字体时手动下载插件字体缓存。"""
+        deny = self._guard_access(event)
+        if deny:
+            yield self._plain(event, "\n".join([self._time_line(), deny]))
+            return
+
+        status = self._get_cjk_font_status()
+        if not status.available:
+            await asyncio.to_thread(self._download_cjk_font_if_needed, True)
+            status = self._get_cjk_font_status()
+
+        yield self._plain(event, "\n".join(self._build_font_status_lines(status)))
+
     @filter.command("apexrank")
     async def apexrank(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
         """查询指定 Apex 玩家段位、分数、等级和在线状态，支持平台或 UID。"""
@@ -1222,6 +1250,14 @@ class Main(Star):
             return
         raw = text.lstrip()
         if raw.startswith(("/", "／")):
+            first = raw.split(maxsplit=1)[0].lstrip("/").lstrip("／").strip().lower()
+            if first in {"apex_download", "apexdownload", "apexfont", "apex字体", "apex字体下载"}:
+                return
+            if first in self._KEYWORD_COMMAND_BLOCKLIST:
+                if self._consume_font_download_notice_needed():
+                    yield self._plain(
+                        event, "\n".join(self._build_font_download_notice_lines())
+                    )
             return
         first = raw.split(maxsplit=1)[0].lstrip("/").lstrip("／").strip()
         if first and first.lower() in self._KEYWORD_COMMAND_BLOCKLIST:
@@ -2053,6 +2089,7 @@ class Main(Star):
             "——",
             "【管理】",
             "/apexblacklist <add|remove|list|clear> <玩家ID>  别名：/apex黑名单 /不准视奸 /apexban",
+            "/apex_download  检测中文字体并在缺失时下载字体缓存",
             "——",
             "【参数】",
             "平台：PC / PS4 / X1 / SWITCH（默认 PC；PC 无数据自动尝试其他平台）",
@@ -2146,6 +2183,7 @@ class Main(Star):
                     ("/apexblacklist add 玩家ID", "加入动态黑名单"),
                     ("/apexblacklist list", "查看配置与动态黑名单"),
                     ("/赛季关闭 /赛季开启", "管理本群赛季关键词回复"),
+                    ("/apex_download", "检测或下载中文字体缓存"),
                 ],
             ),
             (
@@ -2169,6 +2207,7 @@ class Main(Star):
             ("最小有效分", f"{getattr(self._config, 'min_valid_score', 1)} 分"),
             ("异常分数", "仅当高分掉到接近 0 分时判定为异常"),
             ("权限", "支持群白名单、QQ 黑名单、主人 QQ、私聊开关"),
+            ("字体", "缺少中文字体时会提示，可用 /apex_download 手动下载"),
         ]
         if config_blacklist or runtime_blacklist:
             rows.append(("黑名单", f"配置 {len(config_blacklist)} 个，动态 {len(runtime_blacklist)} 个"))
@@ -4913,6 +4952,58 @@ class Main(Star):
             data_dir = self._PLUGIN_ROOT / "_generated"
         return Path(data_dir) / "fonts" / self._FONT_FILE_NAME
 
+    @staticmethod
+    def _candidate_system_cjk_font_paths(bold: bool = False) -> list[Path]:
+        windows_fonts = [
+            Path(r"C:\Windows\Fonts\msyhbd.ttc" if bold else r"C:\Windows\Fonts\msyh.ttc"),
+            Path(r"C:\Windows\Fonts\simhei.ttf"),
+            Path(r"C:\Windows\Fonts\simsun.ttc"),
+        ]
+        linux_fonts = [
+            Path(
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
+                if bold
+                else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+            ),
+            Path(
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc"
+                if bold
+                else "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
+            ),
+            Path(
+                "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Bold.otf"
+                if bold
+                else "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf"
+            ),
+            Path(
+                "/usr/share/fonts/truetype/noto/NotoSansCJKsc-Bold.otf"
+                if bold
+                else "/usr/share/fonts/truetype/noto/NotoSansCJKsc-Regular.otf"
+            ),
+            Path("/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Bold.otf")
+            if bold
+            else Path("/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Regular.otf"),
+            Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
+            Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+            Path("/usr/share/fonts/truetype/arphic/uming.ttc"),
+            Path("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"),
+        ]
+        mac_fonts = [
+            Path("/System/Library/Fonts/PingFang.ttc"),
+            Path("/System/Library/Fonts/STHeiti Light.ttc"),
+            Path("/Library/Fonts/Arial Unicode.ttf"),
+        ]
+        return windows_fonts + linux_fonts + mac_fonts
+
+    def _resolve_system_cjk_font_path(self, bold: bool = False) -> Path | None:
+        for path in self._candidate_system_cjk_font_paths(bold=bold):
+            try:
+                if path.exists():
+                    return path
+            except Exception:
+                continue
+        return None
+
     def _resolve_cached_cjk_font_path(self) -> Path | None:
         font_path = self._font_cache_path()
         if not font_path.exists():
@@ -4926,15 +5017,73 @@ class Main(Star):
             logger.warning(f"Apex Rank Watch 字体缓存读取失败：{exc}")
         return None
 
-    def _download_cjk_font_if_needed(self) -> Path | None:
+    def _get_cjk_font_status(self) -> FontStatus:
+        system_font = self._resolve_system_cjk_font_path()
+        if system_font is not None:
+            return FontStatus(True, "system", system_font)
+        cached_font = self._resolve_cached_cjk_font_path()
+        if cached_font is not None:
+            return FontStatus(True, "cache", cached_font)
+        return FontStatus(False, "missing", None)
+
+    def _consume_font_download_notice_needed(self) -> bool:
+        if getattr(self, "_font_notice_sent", False):
+            return False
+        status = self._get_cjk_font_status()
+        if status.available:
+            return False
+        self._font_notice_sent = True
+        return True
+
+    def _build_font_download_notice_lines(self) -> list[str]:
+        config = getattr(self, "_config", None)
+        auto_enabled = getattr(config, "font_auto_download", True)
+        lines = [
+            self._time_line(),
+            "⚠️ 未检测到可用中文字体，图片里的中文可能显示为空白或方块。",
+        ]
+        if auto_enabled:
+            lines.append("插件会在首次生成图片时自动下载字体，也可以发送 /apex_download 立即下载。")
+        else:
+            lines.append("当前已关闭自动字体下载，可以发送 /apex_download 手动下载。")
+        lines.extend(
+            [
+                "字体约 16MB，会保存到 AstrBot 插件数据目录，并通过 SHA256 校验后使用。",
+                "如果服务器无法访问 GitHub，可在配置里填写 font_download_url 镜像地址。",
+            ]
+        )
+        return lines
+
+    def _build_font_status_lines(self, status: FontStatus) -> list[str]:
+        lines = [self._time_line(), "🧩 Apex Rank Watch 中文字体检测"]
+        if status.available:
+            source_label = "系统字体" if status.source == "system" else "插件缓存字体"
+            lines.append(f"✅ 中文字体已可用，来源：{source_label}")
+            if status.path is not None:
+                lines.append(f"路径：{status.path}")
+            if status.source == "system":
+                lines.append("无需额外下载字体。")
+            return lines
+
+        lines.extend(
+            [
+                "❌ 当前未检测到可用中文字体，图片中文可能显示异常。",
+                "已尝试下载插件字体缓存，但暂未成功。",
+                f"默认下载地址：{self._FONT_DOWNLOAD_URL}",
+                "请确认服务器可以访问 GitHub，或在配置中填写 font_download_url 镜像地址后重试 /apex_download。",
+            ]
+        )
+        return lines
+
+    def _download_cjk_font_if_needed(self, force: bool = False) -> Path | None:
         cached_path = self._resolve_cached_cjk_font_path()
         if cached_path is not None:
             return cached_path
 
         config = getattr(self, "_config", None)
-        if not getattr(config, "font_auto_download", True):
+        if not force and not getattr(config, "font_auto_download", True):
             return None
-        if getattr(self, "_font_download_attempted", False):
+        if not force and getattr(self, "_font_download_attempted", False):
             return None
         self._font_download_attempted = True
 
@@ -4976,24 +5125,12 @@ class Main(Star):
             return None
 
     def _font(self, size: int, bold: bool = False):
-        candidates = [
-            r"C:\Windows\Fonts\msyhbd.ttc" if bold else r"C:\Windows\Fonts\msyh.ttc",
-            r"C:\Windows\Fonts\simhei.ttf",
-            r"C:\Windows\Fonts\simsun.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
-            if bold
-            else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc"
-            if bold
-            else "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        ]
-        for font_path in candidates:
+        system_font = self._resolve_system_cjk_font_path(bold=bold)
+        if system_font is not None:
             try:
-                path = Path(font_path)
-                if path.exists():
-                    return ImageFont.truetype(str(path), size=size)
+                return ImageFont.truetype(str(system_font), size=size)
             except Exception:
-                continue
+                pass
 
         downloaded_font = self._download_cjk_font_if_needed()
         if downloaded_font is not None:
