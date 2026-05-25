@@ -1990,8 +1990,9 @@ def _is_player_not_found(data: dict[str, Any]) -> bool:
     global_data = data.get("global")
     if not isinstance(global_data, dict):
         return True
-    name = global_data.get("name")
-    return not name
+    uid = str(global_data.get("uid") or "").strip()
+    name = str(global_data.get("name") or "").strip()
+    return not (uid or name)
 
 
 def _parse_player_stats(
