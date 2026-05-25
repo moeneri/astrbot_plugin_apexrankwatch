@@ -1,6 +1,6 @@
 name: astrbot_plugin_apexrankwatch
 display_name: Apex Rank Watch
-version: 2.2.1
+version: 2.2.2
 author: moeneri
 description: 支持查询 APEX 玩家段位、地图轮换时间、赛季时间，持续监控玩家段位变化并通知。
 repo: https://github.com/moeneri/astrbot_plugin_apexrankwatch

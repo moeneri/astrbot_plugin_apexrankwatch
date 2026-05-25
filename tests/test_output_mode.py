@@ -91,6 +91,28 @@ def _sample_player(main_module):
     )
 
 
+def _blank_name_uid_payload():
+    return {
+        "global": {
+            "name": "",
+            "uid": "1007669673322",
+            "level": 358,
+            "rank": {
+                "rankScore": 5933,
+                "rankName": "Gold",
+                "rankDiv": 4,
+                "ALStopPercentGlobal": 54,
+            },
+        },
+        "realtime": {
+            "isOnline": 0,
+            "selectedLegend": "Mad Maggie",
+            "currentStateAsText": "Offline",
+        },
+        "legends": {"selected": {"data": []}},
+    }
+
+
 def test_output_mode_defaults_to_image_and_accepts_text():
     main_module = _load_main_module()
 
@@ -164,6 +186,48 @@ def test_player_rank_image_mode_uses_rendered_image(monkeypatch, tmp_path):
     result = asyncio.run(collect())
 
     assert result == [("image", image_path)]
+
+
+def test_cn_query_uid_command_accepts_api_response_with_blank_player_name(monkeypatch):
+    main_module = _load_main_module()
+    api_client = object.__new__(main_module.ApexApiClient)
+    api_client._api_key = "key"
+
+    async def fake_request(_url, _params):
+        return _blank_name_uid_payload()
+
+    api_client._request_with_retry = fake_request
+
+    plugin = object.__new__(main_module.Main)
+    plugin._config = types.SimpleNamespace(api_key="key", min_valid_score=1, output_mode="text")
+    plugin._api = api_client
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_is_blacklisted", lambda player: False)
+    monkeypatch.setattr(plugin, "_is_query_blocked", lambda player: False)
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+    monkeypatch.setattr(plugin, "_image", lambda event, path: ("image", path))
+
+    class _Event:
+        pass
+
+    async def collect():
+        return [
+            item
+            async for item in plugin.apexrank_query_cn(
+                _Event(), "uid:1007669673322", "pc"
+            )
+        ]
+
+    result = asyncio.run(collect())
+
+    assert len(result) == 1
+    assert result[0][0] == "plain"
+    assert "未找到该玩家" not in result[0][1]
+    assert "1007669673322" in result[0][1]
+    assert "5933" in result[0][1]
+    assert "黄金 4" in result[0][1]
 
 
 async def _async_return(value):

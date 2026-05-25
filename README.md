@@ -107,3 +107,7 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 ## 许可
 
 MIT
+
+## 开发说明
+
+本插件使用 CODEX+GPT5.5 协助编写。
