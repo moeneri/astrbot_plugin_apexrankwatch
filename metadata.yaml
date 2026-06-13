@@ -1,8 +1,25 @@
 name: astrbot_plugin_apexrankwatch
 display_name: Apex Rank Watch
-version: 2.2.2
+version: 2.3.2
 author: moeneri
-description: 支持查询 APEX 玩家段位、地图轮换时间、赛季时间，持续监控玩家段位变化并通知。
+short_desc: 查询 APEX 段位、地图、赛季、猎杀线，支持监控、全局别名和个人绑定。
+description: |-
+  支持查询 APEX 玩家段位、地图轮换时间、赛季时间和猎杀线，持续监控玩家段位变化并通知。
+
+  插件行为：
+  - 玩家查询：输出段位、RP、等级、在线状态和当前英雄，可用玩家名、uid:、uuid:、全局别名或个人绑定查询。
+  - 群内监控：添加玩家后定时检查排位分变化，变化时主动推送通知。
+  - 地图与赛季：查询排位地图、全天地图排期、匹配地图、赛季结束时间和猎杀线。
+  - 别名功能：别名是全局查询映射，适合把群内常用称呼映射到玩家名或 UID；别名列表不包含个人绑定。
+  - 绑定功能：绑定是个人默认查询目标，用户绑定后直接发送 /apex查询 可查看自己的信息。
+
+  指令/指令组：
+  - 查询：/apexrank <玩家名|uid:...> [平台]、/apex查询、/视奸
+  - 监控：/apexrankwatch <玩家名|uid:...> [平台]、/apexranklist、/apexrankremove <玩家名|uid:...> [平台]
+  - 信息：/map、/全天地图、/匹配地图、/apexseason、/apexpredator [平台]、/猎杀
+  - 别名：/apexalias add <别名> <玩家名|uid:...> [平台]、/apexalias list、/apexalias remove <别名>、/apex取消别名 <别名>
+  - 绑定：/apex绑定 <玩家名|uid:...> [平台]、/apex绑定 list、/apex绑定列表、/apex绑定 remove、/apex解绑
+  - 管理：/apexblacklist <add|remove|list|clear> <玩家ID>、/赛季关闭、/赛季开启、/apex_download
 repo: https://github.com/moeneri/astrbot_plugin_apexrankwatch
 license: MIT
 astrbot_version: ">=4.16,<5"

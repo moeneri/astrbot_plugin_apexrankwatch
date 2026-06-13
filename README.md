@@ -2,6 +2,8 @@
 
 Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Apex Legends 玩家段位、地图轮换、当前赛季结束时间和猎杀线，并支持群内持续监控排位分变化。
 
+本插件使用 CODEX+GPT5.5 辅助编程与维护。
+
 ## 功能
 
 - 查询玩家段位、RP、等级、在线状态和当前英雄，并输出图片卡片
@@ -10,6 +12,7 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 - 查询当前赛季结束时间
 - 查询本赛季猎杀线和大师数量（包含猎杀）
 - 支持玩家名、`uid:`、`uuid:` 查询
+- 支持全局查询别名和个人默认查询绑定；别名是全局查询映射，绑定是个人默认查询目标
 - 支持群白名单、用户黑名单、玩家查询黑名单
 
 ## 常用命令效果
@@ -32,11 +35,32 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 | `🕘 /全天地图` | 查询 API 学习确认的排位未来 24 小时地图 |
 | `🌍 /匹配地图` | 查询三人赛匹配地图轮换 |
 | `🗓️ /apexseason` | 查询当前赛季信息 |
-| `🏆 /apexpredator [平台]` | 查询猎杀线和大师数量 |
+| `🏆 /apexpredator [平台]` / `/猎杀` | 查询猎杀线和大师数量 |
 | `🚫 /apexblacklist <add\|remove\|list\|clear> <玩家ID>` | 管理玩家黑名单 |
+| `🔖 /apexalias add <别名> <玩家名\|uid:...> [平台]` | 添加查询别名 |
+| `🔖 /apexalias remove <别名>` / `/apex取消别名 <别名>` | 移除动态查询别名 |
+| `🔖 /apexalias list` / `clear` | 查看或清空动态查询别名；列表不包含个人绑定 |
+| `🔖 /apex绑定 <玩家名\|uid:...> [平台]` | 绑定自己的默认查询目标 |
+| `🔖 /apex绑定 list` / `/apex绑定列表` | 查看 QQ 用户与默认查询目标的绑定列表 |
+| `🔖 /apex绑定 remove` / `/apex解绑` | 取消自己的默认查询绑定 |
 | `🧩 /apex_download` | 检测中文字体状态，并在缺少字体时下载插件字体缓存 |
 | `🔁 /赛季关闭` | 关闭当前群的“赛季”关键词自动回复 |
 | `🔁 /赛季开启` | 开启当前群的“赛季”关键词自动回复 |
+
+## 插件行为与指令组
+
+- 查询指令组：`/apexrank <玩家名|uid:...> [平台]`、`/apex查询`、`/视奸`
+  查询玩家段位、RP、等级、在线状态和当前英雄；支持玩家名、`uid:`、`uuid:`、全局查询别名和个人绑定。
+- 监控指令组：`/apexrankwatch <玩家名|uid:...> [平台]`、`/apexranklist`、`/apexrankremove <玩家名|uid:...> [平台]`
+  在群内持续监控玩家排位分变化，分数变化时主动推送通知；支持中文别名 `/apex监控`、`/apex列表`、`/apex移除`。
+- 信息指令组：`/map`、`/全天地图`、`/匹配地图`、`/apexseason`、`/apexpredator [平台]`、`/猎杀`
+  查询排位地图、未来 24 小时地图排期、三人赛地图、赛季时间和猎杀线。
+- 别名指令组：`/apexalias add <别名> <玩家名|uid:...> [平台]`、`/apexalias list`、`/apexalias remove <别名>`、`/apex取消别名 <别名>`
+  别名是全局查询映射，适合管理员把群里常用称呼映射到真实玩家名或 UID；`/apexalias list` 图片模式只展示配置别名和动态别名，不展示个人绑定。
+- 绑定指令组：`/apex绑定 <玩家名|uid:...> [平台]`、`/apex绑定 list`、`/apex绑定列表`、`/apex绑定 remove`、`/apex解绑`
+  绑定是个人默认查询目标，用户绑定后直接发送 `/apex查询` 就会查询自己的绑定目标；绑定列表与别名列表分开展示。
+- 管理指令组：`/apexblacklist <add|remove|list|clear> <玩家ID>`、`/赛季关闭`、`/赛季开启`、`/apex_download`
+  管理玩家黑名单、赛季关键词回复和中文字体缓存。
 
 ## 常用别名
 
@@ -48,6 +72,8 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 - 全天地图：`/全天排位地图`、`/今日地图`、`/今日排位地图`、`/dailymap`
 - 猎杀线：`/apex猎杀`、`/猎杀`
 - 黑名单：`/apex黑名单`、`/不准视奸`、`/apexban`
+- 查询别名：`/apex别名`、`/apex取消别名`
+- 个人绑定：`/apex绑定`、`/apex绑定列表`、`/apex解绑`
 - 帮助：`/apexrankhelp`、`/apex帮助`
 
 ## 使用示例
@@ -55,12 +81,20 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 ```text
 /apexrank moeneri pc
 /apexrank uid:0000000000000 pc
+/apexalias add 测试 uid:0000000000000
+/apexalias list
+/apexrank 测试
+/apex绑定 uid:0000000000000
+/apex查询
+/apex绑定 list
+/apex解绑
 /apexrankwatch moeneri pc
 /apexrankremove moeneri pc
 /map
 /全天地图
 /匹配地图
 /apexpredator pc
+/猎杀
 /apex_download
 ```
 
@@ -84,6 +118,9 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 | `min_valid_score` | `1` | 最小有效分数，低于该值会被视为异常数据 |
 | `blacklist` | 空 | 禁止查询和监控的玩家 ID 列表 |
 | `query_blocklist` | 空 | 仅禁止查询的玩家 ID 列表 |
+| `player_aliases` | 空 | 全局查询别名映射，多个用逗号分隔，例如 `测试=uid:0000000000000,小明=EaName pc`；不包含个人绑定 |
+| `alias_enabled` | `true` | 是否启用查询别名和 `/apex绑定` 个人默认查询 |
+| `alias_admin_only` | `true` | 是否仅允许主人/管理员通过 QQ 命令管理查询别名 |
 | `user_blacklist` | 空 | 禁止使用插件的 QQ 号列表 |
 | `owner_qq` | 空 | 插件管理员 QQ 号列表 |
 | `whitelist_enabled` | `false` | 是否启用群白名单模式 |
@@ -103,6 +140,12 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 - 监控通知依赖 AstrBot 的主动消息能力；如果当前适配器不支持主动消息，查询命令仍可正常使用。
 - Linux/Docker 环境如果没有中文字体，插件会从 `moeneri/apexrankwatch-assets` 下载 Noto Sans CJK 字体到插件数据目录，并用 SHA256 校验后再加载；插件 zip 内不包含完整字体文件。
 - 第一次使用插件命令时如果检测不到中文字体，会先提示字体下载方式；也可以随时发送 `/apex_download` 手动检测和下载。
+
+## 数据来源
+
+- 玩家段位、RP、猎杀线、大师数量、地图轮换等接口数据来自 Apex Legends API（`api.mozambiquehe.re`）。
+- 赛季倒计时和部分赛季信息参考 `apexlegendsstatus.com` 的公开信息。
+- 插件仅做查询、整理和图片展示，数据准确性以对应来源实时返回为准。
 
 ## 许可
 

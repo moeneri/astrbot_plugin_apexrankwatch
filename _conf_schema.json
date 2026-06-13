@@ -34,14 +34,32 @@
   "blacklist": {
     "description": "黑名单 ID 列表",
     "type": "string",
-    "hint": "多个 ID 用中英文逗号分隔，例如：player_a,player_b\nUID 示例：uid:0000000000000",
+    "hint": "多个 ID 用中英文逗号分隔，例如：player_a,player_b；UID 示例：uid:0000000000000",
     "default": ""
   },
   "query_blocklist": {
     "description": "禁止查询的玩家ID列表",
     "type": "string",
-    "hint": "多个ID用中英文逗号分隔，例如：player_a,player_b\nUID 示例：uid:0000000000000",
+    "hint": "多个 ID 用中英文逗号分隔，例如：player_a,player_b；UID 示例：uid:0000000000000",
     "default": ""
+  },
+  "player_aliases": {
+    "description": "查询别名映射",
+    "type": "string",
+    "hint": "多个别名映射用中英文逗号分隔，格式：别名=玩家名 或 别名=uid:0000000000000；目标后可填写平台，例如：测试=uid:1234 pc,小明=EaName pc。配置别名对所有用户生效，不包含个人绑定。",
+    "default": ""
+  },
+  "alias_enabled": {
+    "description": "是否启用查询别名和个人绑定",
+    "type": "bool",
+    "hint": "开启后 player_aliases、/apexalias 和 /apex绑定 生效；关闭后全局别名解析和个人默认查询绑定都会停用。",
+    "default": true
+  },
+  "alias_admin_only": {
+    "description": "是否仅允许主人/管理员用QQ命令管理查询别名",
+    "type": "bool",
+    "hint": "开启后只有 owner_qq 或群管理员可使用 /apexalias、/apex别名 添加/删除别名；关闭后任何可使用插件的用户都可管理别名。",
+    "default": true
   },
   "user_blacklist": {
     "description": "禁止使用的QQ号列表",

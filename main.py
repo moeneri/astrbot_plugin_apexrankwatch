@@ -96,6 +96,9 @@ class PluginConfig:
     font_auto_download: bool
     font_download_url: str
     output_mode: str
+    alias_enabled: bool
+    player_aliases: str
+    alias_admin_only: bool
 
     @staticmethod
     def from_raw(raw) -> "PluginConfig":
@@ -120,6 +123,9 @@ class PluginConfig:
             font_auto_download=coerce_bool(raw.get("font_auto_download", True), True),
             font_download_url=str(raw.get("font_download_url", "")).strip(),
             output_mode=output_mode,
+            alias_enabled=coerce_bool(raw.get("alias_enabled", True), True),
+            player_aliases=str(raw.get("player_aliases", "")).strip(),
+            alias_admin_only=coerce_bool(raw.get("alias_admin_only", True), True),
         )
 
 
@@ -139,6 +145,27 @@ class PollFetchResult:
     player_data: ApexPlayerStats | None = None
     not_found: bool = False
     error: Exception | None = None
+
+
+@dataclass(frozen=True)
+class PlayerAliasEntry:
+    key: str
+    display_name: str
+    target: str
+
+
+@dataclass(frozen=True)
+class PlayerAliasResolution:
+    requested_name: str
+    player_name: str
+    platform: str
+    alias_key: str = ""
+    alias_display: str = ""
+    alias_target: str = ""
+
+    @property
+    def matched(self) -> bool:
+        return bool(self.alias_key)
 
 
 class Main(Star):
@@ -196,6 +223,11 @@ class Main(Star):
         "apex帮助",
         "apexrankhelp",
         "apexblacklist",
+        "apexalias",
+        "apexbind",
+        "apexbindlist",
+        "apexunbind",
+        "apexunalias",
         # 中文别名
         "apex监控",
         "apex列表",
@@ -219,6 +251,14 @@ class Main(Star):
         "apex字体",
         "apex字体下载",
         "apex黑名单",
+        "apex别名",
+        "apex绑定",
+        "apex绑定列表",
+        "apex解绑",
+        "apex取消别名",
+        "取消绑定",
+        "解除绑定",
+        "取消别名",
         "不准视奸",
         "apexban",
         # 赛季关键词开关
@@ -243,6 +283,15 @@ class Main(Star):
         self._season_keyword_disabled_groups = self._normalize_settings_list(
             settings.get("season_keyword_disabled_groups", []),
             lowercase=False,
+        )
+        (
+            self._runtime_player_aliases,
+            self._runtime_player_alias_display_names,
+        ) = self._normalize_settings_alias_payload(
+            settings.get("runtime_player_aliases", {}),
+        )
+        self._runtime_user_bindings = self._normalize_user_bindings(
+            settings.get("runtime_user_bindings", {}),
         )
         self._store = GroupStore(self._data_dir / "groups.json", logger)
         self._store.load()
@@ -400,10 +449,167 @@ class Main(Star):
             items.append(text.lower() if lowercase else text)
         return set(items)
 
+    @staticmethod
+    def _normalize_alias_key(value: str) -> str:
+        return str(value or "").strip().lower()
+
+    def _aliases_enabled(self) -> bool:
+        return bool(getattr(self._config, "alias_enabled", True))
+
+    @classmethod
+    def _normalize_binding_target(cls, value) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        parts = text.split()
+        if parts:
+            first = parts[0].strip()
+            lowered = first.lower()
+            if lowered.startswith("/uid:") or lowered.startswith("/uuid:"):
+                parts[0] = first[1:]
+        return " ".join(parts).strip()
+
+    @classmethod
+    def _make_alias_entry(cls, raw_key, raw_target) -> PlayerAliasEntry | None:
+        display_name = str(raw_key or "").strip()
+        target = ""
+        if isinstance(raw_target, dict):
+            display_name = str(
+                raw_target.get("display")
+                or raw_target.get("display_name")
+                or raw_target.get("alias")
+                or display_name
+            ).strip()
+            target = str(
+                raw_target.get("target")
+                or raw_target.get("value")
+                or raw_target.get("player")
+                or ""
+            ).strip()
+        else:
+            target = str(raw_target or "").strip()
+
+        key = cls._normalize_alias_key(str(raw_key))
+        if not display_name:
+            display_name = key
+        if not key or not target:
+            return None
+        return PlayerAliasEntry(key=key, display_name=display_name, target=target)
+
+    @classmethod
+    def _parse_player_alias_entries(cls, value) -> dict[str, PlayerAliasEntry]:
+        aliases: dict[str, PlayerAliasEntry] = {}
+        if isinstance(value, dict):
+            items = value.items()
+        elif isinstance(value, list):
+            items = []
+            for item in value:
+                if isinstance(item, dict):
+                    if "target" in item and any(
+                        key in item for key in ("alias", "display", "display_name", "key")
+                    ):
+                        raw_key = (
+                            item.get("alias")
+                            or item.get("display")
+                            or item.get("display_name")
+                            or item.get("key")
+                        )
+                        items.append((raw_key, item))
+                    else:
+                        items.extend(item.items())
+                    continue
+                text = str(item or "").strip()
+                if "=" in text:
+                    key, target = text.split("=", 1)
+                    items.append((key, target))
+        else:
+            text = str(value or "")
+            for separator in ("，", ",", "；", ";"):
+                text = text.replace(separator, "\n")
+            items = []
+            for line in text.splitlines():
+                line = line.strip()
+                if not line or "=" not in line:
+                    continue
+                key, target = line.split("=", 1)
+                items.append((key, target))
+
+        for raw_key, raw_target in items:
+            entry = cls._make_alias_entry(raw_key, raw_target)
+            if entry is not None:
+                aliases[entry.key] = entry
+        return aliases
+
+    @classmethod
+    def _parse_player_aliases(cls, value) -> dict[str, str]:
+        return {
+            key: entry.target
+            for key, entry in cls._parse_player_alias_entries(value).items()
+        }
+
+    def _normalize_settings_alias_payload(self, value) -> tuple[dict[str, str], dict[str, str]]:
+        entries = self._parse_player_alias_entries(value)
+        return (
+            {key: entry.target for key, entry in entries.items()},
+            {key: entry.display_name for key, entry in entries.items()},
+        )
+
+    def _normalize_settings_aliases(self, value) -> dict[str, str]:
+        return self._parse_player_aliases(value)
+
+    @classmethod
+    def _normalize_user_bindings(cls, value) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        bindings: dict[str, str] = {}
+        for raw_user_id, raw_target in value.items():
+            user_id = str(raw_user_id or "").strip()
+            if isinstance(raw_target, dict):
+                raw_target = (
+                    raw_target.get("target")
+                    or raw_target.get("value")
+                    or raw_target.get("player")
+                    or ""
+                )
+            target = cls._normalize_binding_target(raw_target)
+            if user_id and target:
+                bindings[user_id] = target
+        return bindings
+
+    def _get_config_player_aliases(self) -> dict[str, str]:
+        return self._parse_player_aliases(getattr(self._config, "player_aliases", ""))
+
+    def _get_config_player_alias_display_names(self) -> dict[str, str]:
+        return {
+            key: entry.display_name
+            for key, entry in self._parse_player_alias_entries(
+                getattr(self._config, "player_aliases", "")
+            ).items()
+        }
+
+    def _get_runtime_player_alias_display_names(self) -> dict[str, str]:
+        aliases = getattr(self, "_runtime_player_aliases", {})
+        display_names = dict(getattr(self, "_runtime_player_alias_display_names", {}) or {})
+        for key in aliases:
+            display_names.setdefault(key, key)
+        return display_names
+
+    def _get_player_aliases(self) -> dict[str, str]:
+        aliases = self._get_config_player_aliases()
+        aliases.update(getattr(self, "_runtime_player_aliases", {}))
+        return aliases
+
+    def _get_player_alias_display_names(self) -> dict[str, str]:
+        display_names = self._get_config_player_alias_display_names()
+        display_names.update(self._get_runtime_player_alias_display_names())
+        return display_names
+
     def _load_settings(self) -> dict:
         defaults = {
             "runtime_blacklist": [],
             "season_keyword_disabled_groups": [],
+            "runtime_player_aliases": {},
+            "runtime_user_bindings": {},
         }
         if not self._settings_file.exists():
             return defaults
@@ -419,9 +625,20 @@ class Main(Star):
             return defaults
 
     def _save_settings(self) -> None:
+        alias_display_names = self._get_runtime_player_alias_display_names()
         payload = {
             "runtime_blacklist": sorted(self._runtime_blacklist),
             "season_keyword_disabled_groups": sorted(self._season_keyword_disabled_groups),
+            "runtime_player_aliases": {
+                key: {
+                    "target": target,
+                    "display": alias_display_names.get(key, key),
+                }
+                for key, target in sorted(self._runtime_player_aliases.items())
+            },
+            "runtime_user_bindings": dict(
+                sorted(getattr(self, "_runtime_user_bindings", {}).items())
+            ),
         }
         try:
             self._settings_file.parent.mkdir(parents=True, exist_ok=True)
@@ -801,6 +1018,203 @@ class Main(Star):
             return player_name.strip(), ""
         return "", ""
 
+    def _parse_alias_target_platform(self, target: str) -> tuple[str, str]:
+        text = str(target or "").strip()
+        if not text:
+            return "", ""
+        parts = text.split()
+        if len(parts) >= 2 and self._is_platform_token(parts[-1]):
+            identifier = " ".join(parts[:-1]).strip()
+            if identifier:
+                return identifier, parts[-1].strip()
+        return text, ""
+
+    def _resolve_player_alias(self, player_name: str, platform: str) -> tuple[str, str]:
+        resolved = self._resolve_player_alias_info(player_name, platform)
+        return resolved.player_name, resolved.platform
+
+    def _resolve_player_alias_info(
+        self, player_name: str, platform: str
+    ) -> PlayerAliasResolution:
+        if not self._aliases_enabled():
+            return PlayerAliasResolution(player_name, player_name, platform)
+        alias_key = self._normalize_alias_key(player_name)
+        if not alias_key:
+            return PlayerAliasResolution(player_name, player_name, platform)
+        target = self._get_player_aliases().get(alias_key)
+        if not target:
+            return PlayerAliasResolution(player_name, player_name, platform)
+        resolved_name, alias_platform = self._parse_alias_target_platform(target)
+        display_names = self._get_player_alias_display_names()
+        return PlayerAliasResolution(
+            requested_name=player_name,
+            player_name=resolved_name or player_name,
+            platform=platform or alias_platform,
+            alias_key=alias_key,
+            alias_display=display_names.get(alias_key, str(player_name or "").strip()),
+            alias_target=target,
+        )
+
+    def _resolve_user_binding_info(
+        self, event: AstrMessageEvent, platform: str
+    ) -> PlayerAliasResolution:
+        if not self._aliases_enabled():
+            return PlayerAliasResolution("", "", platform)
+        user_id = self._get_user_id(event)
+        target = getattr(self, "_runtime_user_bindings", {}).get(user_id, "")
+        if not user_id or not target:
+            return PlayerAliasResolution("", "", platform)
+        resolved_name, alias_platform = self._parse_alias_target_platform(target)
+        return PlayerAliasResolution(
+            requested_name="",
+            player_name=resolved_name,
+            platform=platform or alias_platform,
+            alias_key=f"user:{user_id}",
+            alias_display="我的绑定",
+            alias_target=target,
+        )
+
+    def _parse_alias_command(
+        self, event: AstrMessageEvent, action: str, alias: str, target: str
+    ) -> tuple[str, str, str]:
+        text = self._extract_command_args(event)
+        if text:
+            parts = text.split(maxsplit=2)
+            if parts:
+                action = parts[0]
+            if len(parts) > 1:
+                alias = parts[1]
+            if len(parts) > 2:
+                target = parts[2]
+        return (action or "").strip(), (alias or "").strip(), (target or "").strip()
+
+    @staticmethod
+    def _display_name_with_alias(alias: str, actual: str) -> str:
+        alias_text = str(alias or "").strip()
+        actual_text = str(actual or "").strip()
+        if alias_text and actual_text and alias_text.lower() != actual_text.lower():
+            return f"{alias_text}（{actual_text}）"
+        return alias_text or actual_text or "未知"
+
+    def _format_player_aliases(
+        self,
+        aliases: dict[str, str],
+        display_names: dict[str, str] | None = None,
+        overridden_keys: set[str] | None = None,
+    ) -> str:
+        if not aliases:
+            return "无"
+        display_names = display_names or {}
+        overridden_keys = overridden_keys or set()
+        items = []
+        for key, value in sorted(aliases.items()):
+            display = display_names.get(key, key)
+            suffix = "（已被动态覆盖）" if key in overridden_keys else ""
+            items.append(f"{display}={value}{suffix}")
+        return "，".join(items)
+
+    def _format_effective_player_aliases(self) -> str:
+        return self._format_player_aliases(
+            self._get_player_aliases(),
+            self._get_player_alias_display_names(),
+        )
+
+    def _format_user_bindings(self, bindings: dict[str, str] | None = None) -> str:
+        bindings = bindings if bindings is not None else getattr(self, "_runtime_user_bindings", {})
+        if not bindings:
+            return "无"
+        return "，".join(
+            f"QQ {user_id}={target}" for user_id, target in sorted(bindings.items())
+        )
+
+    @staticmethod
+    def _alias_list_entries(
+        config_aliases: dict[str, str],
+        runtime_aliases: dict[str, str],
+        config_display_names: dict[str, str] | None = None,
+        runtime_display_names: dict[str, str] | None = None,
+    ) -> list[tuple[str, str, str]]:
+        config_display_names = config_display_names or {}
+        runtime_display_names = runtime_display_names or {}
+        entries: list[tuple[str, str, str]] = []
+        for key, target in sorted(config_aliases.items()):
+            source = "配置（已覆盖）" if key in runtime_aliases else "配置（生效）"
+            entries.append((config_display_names.get(key, key), target, source))
+        for key, target in sorted(runtime_aliases.items()):
+            entries.append((runtime_display_names.get(key, key), target, "动态（生效）"))
+        return entries
+
+    @staticmethod
+    def _binding_list_entries(bindings: dict[str, str] | None = None) -> list[tuple[str, str, str]]:
+        bindings = bindings or {}
+        return [
+            (f"QQ {user_id}", target, "个人绑定")
+            for user_id, target in sorted(bindings.items())
+        ]
+
+    def _binding_list_response(self, event: AstrMessageEvent, bindings: dict[str, str]):
+        entries = self._binding_list_entries(bindings)
+        lines = [
+            self._time_line(),
+            "🔖 Apex 查询绑定列表",
+            f"个人绑定：{self._format_user_bindings(bindings)}",
+            "提示：绑定只用于对应 QQ 用户直接发送 /apex查询 的默认目标",
+        ]
+        if self._is_image_output_mode():
+            try:
+                image_path = self._render_binding_list_image(entries)
+                return self._image(event, image_path)
+            except Exception as exc:
+                logger.error(f"查询绑定列表图片生成失败，已回退文字输出: {exc}")
+        return self._plain(event, "\n".join(lines))
+
+    def _remove_current_user_binding_response(self, event: AstrMessageEvent):
+        user_id = self._get_user_id(event)
+        if not user_id:
+            return self._plain(event, "\n".join([self._time_line(), "⚠️ 无法识别当前用户，暂不能解绑"]))
+
+        bindings = getattr(self, "_runtime_user_bindings", {})
+        removed = bindings.pop(user_id, "")
+        self._runtime_user_bindings = bindings
+        if removed:
+            self._save_settings()
+            return self._plain(
+                event,
+                "\n".join([self._time_line(), f"✅ 已解除你的 Apex 查询绑定：{removed}"]),
+            )
+        return self._plain(event, "\n".join([self._time_line(), "ℹ️ 你当前没有 Apex 查询绑定"]))
+
+    def _apply_alias_to_player_data(
+        self, player_data: ApexPlayerStats, alias_info: PlayerAliasResolution
+    ) -> None:
+        if not alias_info.matched:
+            return
+        setattr(player_data, "display_alias", alias_info.alias_display)
+        setattr(player_data, "alias_target", alias_info.alias_target)
+        setattr(player_data, "alias_lookup_name", alias_info.player_name)
+
+    def _apply_record_alias_to_player_data(
+        self, player_data: ApexPlayerStats, player: PlayerRecord
+    ) -> None:
+        display_alias = str(getattr(player, "display_alias", "") or "").strip()
+        alias_target = str(getattr(player, "alias_target", "") or "").strip()
+        if display_alias:
+            setattr(player_data, "display_alias", display_alias)
+        if alias_target:
+            setattr(player_data, "alias_target", alias_target)
+
+    def _player_data_display_name(self, player_data: ApexPlayerStats) -> str:
+        return self._display_name_with_alias(
+            str(getattr(player_data, "display_alias", "") or ""),
+            str(getattr(player_data, "name", "") or ""),
+        )
+
+    def _record_display_name(self, player: PlayerRecord) -> str:
+        return self._display_name_with_alias(
+            str(getattr(player, "display_alias", "") or ""),
+            str(getattr(player, "player_name", "") or ""),
+        )
+
     def _is_blacklisted(self, player_name: str) -> bool:
         if not player_name:
             return False
@@ -819,6 +1233,20 @@ class Main(Star):
             for item in _split_csv(self._config.query_blocklist)
         }
         return self._normalize_lookup_value(player_name) in blocked
+
+    def _blocked_lookup_name(self, *player_names: str) -> str:
+        checked: set[str] = set()
+        for player_name in player_names:
+            display_name = str(player_name or "").strip()
+            if not display_name:
+                continue
+            normalized = self._normalize_lookup_value(display_name)
+            if not normalized or normalized in checked:
+                continue
+            checked.add(normalized)
+            if self._is_blacklisted(display_name) or self._is_query_blocked(display_name):
+                return display_name
+        return ""
 
     def _get_group_id(self, event: AstrMessageEvent) -> str:
         message_obj = getattr(event, "message_obj", None)
@@ -996,19 +1424,25 @@ class Main(Star):
             yield self._plain(event, "\n".join([self._time_line(), deny]))
             return
 
-        player_name, platform = self._parse_player_platform(event, player_name, platform)
+        requested_player_name, platform = self._parse_player_platform(event, player_name, platform)
+        if requested_player_name:
+            alias_info = self._resolve_player_alias_info(requested_player_name, platform)
+        else:
+            alias_info = self._resolve_user_binding_info(event, platform)
+        player_name, platform = alias_info.player_name, alias_info.platform
         if not player_name:
             yield self._plain(event, 
                 "\n".join([self._time_line(), "⚠️ 请提供玩家名称，例如: /apexrank PlayerName"])
             )
             return
 
-        if self._is_blacklisted(player_name) or self._is_query_blocked(player_name):
+        blocked_name = self._blocked_lookup_name(requested_player_name, player_name)
+        if blocked_name:
             yield self._plain(event, 
                 "\n".join(
                     [
                         self._time_line(),
-                        f"⛔ 该ID（{player_name}）已被管理员加入黑名单，禁止查询",
+                        f"⛔ 该ID（{blocked_name}）已被管理员加入黑名单，禁止查询",
                     ]
                 )
             )
@@ -1061,6 +1495,7 @@ class Main(Star):
             return
 
         player_data.platform = used_platform
+        self._apply_alias_to_player_data(player_data, alias_info)
         if self._is_text_output_mode():
             yield self._plain(event, self._format_player_rank_text(player_data))
             return
@@ -1391,7 +1826,9 @@ class Main(Star):
             yield self._plain(event, "\n".join([self._time_line(), deny]))
             return
 
-        player_name, platform = self._parse_player_platform(event, player_name, platform)
+        requested_player_name, platform = self._parse_player_platform(event, player_name, platform)
+        alias_info = self._resolve_player_alias_info(requested_player_name, platform)
+        player_name, platform = alias_info.player_name, alias_info.platform
         if not player_name:
             yield self._plain(event, 
                 "\n".join(
@@ -1407,12 +1844,13 @@ class Main(Star):
             )
             return
 
-        if self._is_blacklisted(player_name) or self._is_query_blocked(player_name):
+        blocked_name = self._blocked_lookup_name(requested_player_name, player_name)
+        if blocked_name:
             yield self._plain(event, 
                 "\n".join(
                     [
                         self._time_line(),
-                        f"⛔ 该ID（{player_name}）已被管理员加入黑名单，禁止监控",
+                        f"⛔ 该ID（{blocked_name}）已被管理员加入黑名单，禁止监控",
                     ]
                 )
             )
@@ -1467,9 +1905,13 @@ class Main(Star):
         normalized_platform = self._normalize_platform(used_platform)
         player_key = self._build_player_key(identifier, normalized_platform, use_uid)
         group = self._store.ensure_group(group_id, event.unified_msg_origin)
+        display_name = self._display_name_with_alias(
+            alias_info.alias_display if alias_info.matched else "",
+            player_data.name,
+        )
 
         if player_key in group.players:
-            yield self._plain(event, f"本群已经在监控 {player_name} 的排名变化了")
+            yield self._plain(event, f"本群已经在监控 {display_name} 的排名变化了")
             return
 
         record = PlayerRecord(
@@ -1488,19 +1930,22 @@ class Main(Star):
                 else ""
             ),
             last_checked=now_epoch_ms(),
+            display_alias=alias_info.alias_display if alias_info.matched else "",
+            alias_target=alias_info.alias_target if alias_info.matched else "",
         )
         self._store.set_player(group_id, player_key, record)
         self._store.save()
 
         await self._send_active_message(
-            event.unified_msg_origin, f"✅ 测试消息: 已添加对 {player_data.name} 的排名监控"
+            event.unified_msg_origin, f"✅ 测试消息: 已添加对 {display_name} 的排名监控"
         )
 
         player_data.platform = normalized_platform
+        self._apply_alias_to_player_data(player_data, alias_info)
         success_text = "\n".join(
             [
                 self._time_line(),
-                f"✅ 成功添加对 {player_data.name} 的排名监控",
+                f"✅ 成功添加对 {display_name} 的排名监控",
                 f"🖥️ 平台: {self._format_platform(normalized_platform)}",
                 f"🏆 当前排名: {self._get_rank_display_text(player_data)}",
             ]
@@ -1560,6 +2005,12 @@ class Main(Star):
             return
 
         player_name, platform = self._parse_player_platform(event, player_name, platform)
+        alias_info = self._resolve_player_alias_info(player_name, platform)
+        player_name, platform = alias_info.player_name, alias_info.platform
+        display_name = self._display_name_with_alias(
+            alias_info.alias_display if alias_info.matched else "",
+            player_name,
+        )
         if not player_name:
             yield self._plain(event, 
                 "\n".join(
@@ -1589,7 +2040,7 @@ class Main(Star):
         if not group:
             yield self._plain(event, 
                 "\n".join(
-                    [self._time_line(), f"ℹ️ 本群没有监控 {player_name} 的排名"]
+                    [self._time_line(), f"ℹ️ 本群没有监控 {display_name} 的排名"]
                 )
             )
             return
@@ -1609,14 +2060,14 @@ class Main(Star):
         if not player_key or not self._store.remove_player(group_id, player_key):
             yield self._plain(event, 
                 "\n".join(
-                    [self._time_line(), f"ℹ️ 本群没有监控 {player_name} 的排名"]
+                    [self._time_line(), f"ℹ️ 本群没有监控 {display_name} 的排名"]
                 )
             )
             return
 
         self._store.save()
         yield self._plain(event, 
-            "\n".join([self._time_line(), f"✅ 已移除本群对 {player_name} 的排名监控"])
+            "\n".join([self._time_line(), f"✅ 已移除本群对 {display_name} 的排名监控"])
         )
 
     @filter.command("apexblacklist")
@@ -1745,6 +2196,287 @@ class Main(Star):
         yield self._plain(event, 
             "\n".join([self._time_line(), "⚠️ 未识别的操作，请使用 add/remove/list/clear"])
         )
+
+    @filter.command("apexalias", alias={"apex别名"})
+    async def apexalias(
+        self,
+        event: AstrMessageEvent,
+        action: str = "",
+        alias: str = "",
+        target: str = "",
+    ):
+        """管理 Apex 查询别名，支持 add、remove、list、clear。"""
+        deny = self._guard_access(event)
+        if deny:
+            yield self._plain(event, "\n".join([self._time_line(), deny]))
+            return
+        if not self._aliases_enabled():
+            yield self._plain(event, "\n".join([self._time_line(), "⚠️ 别名功能已关闭"]))
+            return
+        if getattr(self._config, "alias_admin_only", True):
+            admin_deny = self._guard_admin(event)
+            if admin_deny:
+                yield self._plain(event, "\n".join([self._time_line(), admin_deny]))
+                return
+
+        action, alias, target = self._parse_alias_command(event, action, alias, target)
+        action_lower = action.lower()
+        config_aliases = self._get_config_player_aliases()
+        config_display_names = self._get_config_player_alias_display_names()
+        runtime_aliases = getattr(self, "_runtime_player_aliases", {})
+        runtime_display_names = self._get_runtime_player_alias_display_names()
+
+        if not action or action_lower in {"help", "?", "h", "帮助"}:
+            alias_entries = self._alias_list_entries(
+                config_aliases,
+                runtime_aliases,
+                config_display_names,
+                runtime_display_names,
+            )
+            lines = [
+                self._time_line(),
+                "🔖 Apex 查询别名管理",
+                "用法：/apexalias add <别名> <玩家名|uid:...> [平台]",
+                "用法：/apexalias remove <别名>",
+                "用法：/apexalias list",
+                "用法：/apexalias clear",
+                "例：/apexalias add 测试 uid:1234",
+                f"有效别名：{self._format_effective_player_aliases()}",
+                f"配置别名：{self._format_player_aliases(config_aliases, config_display_names, set(runtime_aliases))}",
+                f"动态别名：{self._format_player_aliases(runtime_aliases, runtime_display_names)}",
+                "绑定列表请使用：/apex绑定 list",
+            ]
+            if self._is_image_output_mode():
+                try:
+                    image_path = self._render_alias_list_image(alias_entries)
+                    yield self._image(event, image_path)
+                    return
+                except Exception as exc:
+                    logger.error(f"查询别名管理图片生成失败，已回退文字输出: {exc}")
+            yield self._plain(event, "\n".join(lines))
+            return
+
+        if action_lower in {"list", "ls", "查看", "列表"}:
+            alias_entries = self._alias_list_entries(
+                config_aliases,
+                runtime_aliases,
+                config_display_names,
+                runtime_display_names,
+            )
+            lines = [
+                self._time_line(),
+                "🔖 Apex 查询别名列表",
+                f"有效别名：{self._format_effective_player_aliases()}",
+                f"配置别名：{self._format_player_aliases(config_aliases, config_display_names, set(runtime_aliases))}",
+                f"动态别名：{self._format_player_aliases(runtime_aliases, runtime_display_names)}",
+            ]
+            if self._is_image_output_mode():
+                try:
+                    image_path = self._render_alias_list_image(alias_entries)
+                    yield self._image(event, image_path)
+                    return
+                except Exception as exc:
+                    logger.error(f"查询别名列表图片生成失败，已回退文字输出: {exc}")
+            yield self._plain(event, "\n".join(lines))
+            return
+
+        if action_lower in {"clear", "清空", "clean"}:
+            if not runtime_aliases:
+                yield self._plain(event, "\n".join([self._time_line(), "ℹ️ 动态别名已为空"]))
+                return
+            runtime_aliases.clear()
+            self._runtime_player_alias_display_names = {}
+            self._save_settings()
+            yield self._plain(event, "\n".join([self._time_line(), "✅ 已清空动态别名"]))
+            return
+
+        alias_key = self._normalize_alias_key(alias)
+        if not alias_key:
+            yield self._plain(event, "\n".join([self._time_line(), "⚠️ 请提供别名，例如：/apexalias add 测试 uid:1234"]))
+            return
+
+        if action_lower in {"add", "set", "+", "新增", "添加", "设置"}:
+            if not target:
+                yield self._plain(event, "\n".join([self._time_line(), "⚠️ 请提供别名目标，例如：/apexalias add 测试 uid:1234"]))
+                return
+            runtime_aliases[alias_key] = target.strip()
+            runtime_display_names[alias_key] = alias.strip()
+            self._runtime_player_alias_display_names = runtime_display_names
+            self._save_settings()
+            lines = [
+                self._time_line(),
+                f"✅ 已添加别名：{runtime_display_names[alias_key]} => {runtime_aliases[alias_key]}",
+            ]
+            if alias_key in config_aliases:
+                lines.append("提示：动态别名会优先覆盖面板配置中的同名别名")
+            yield self._plain(event, "\n".join(lines))
+            return
+
+        if action_lower in {"remove", "del", "delete", "rm", "-", "移除", "删除"}:
+            if alias_key in runtime_aliases:
+                removed = runtime_aliases.pop(alias_key)
+                removed_display = runtime_display_names.pop(alias_key, alias_key)
+                self._runtime_player_alias_display_names = runtime_display_names
+                self._save_settings()
+                yield self._plain(
+                    event,
+                    "\n".join([self._time_line(), f"✅ 已移除动态别名：{removed_display} => {removed}"]),
+                )
+                return
+            if alias_key in config_aliases:
+                yield self._plain(
+                    event,
+                    "\n".join([self._time_line(), "⚠️ 该别名来自面板配置，请在插件配置中删除"]),
+                )
+                return
+            yield self._plain(event, "\n".join([self._time_line(), f"ℹ️ 未找到别名：{alias_key}"]))
+            return
+
+        yield self._plain(event, "\n".join([self._time_line(), "⚠️ 未识别的操作，请使用 add/remove/list/clear"]))
+
+    @filter.command("apex取消别名", alias={"apexunalias", "取消别名"})
+    async def apexunalias(self, event: AstrMessageEvent, alias: str = ""):
+        """移除一个动态查询别名；配置面板里的别名需要到配置中删除。"""
+        deny = self._guard_access(event)
+        if deny:
+            yield self._plain(event, "\n".join([self._time_line(), deny]))
+            return
+        if not self._aliases_enabled():
+            yield self._plain(event, "\n".join([self._time_line(), "⚠️ 别名功能已关闭"]))
+            return
+        if getattr(self._config, "alias_admin_only", True):
+            admin_deny = self._guard_admin(event)
+            if admin_deny:
+                yield self._plain(event, "\n".join([self._time_line(), admin_deny]))
+                return
+
+        raw_alias = (self._extract_command_args(event) or str(alias or "")).strip()
+        alias_key = self._normalize_alias_key(raw_alias)
+        if not alias_key:
+            yield self._plain(event, "\n".join([self._time_line(), "⚠️ 请提供别名，例如：/apex取消别名 测试"]))
+            return
+
+        config_aliases = self._get_config_player_aliases()
+        runtime_aliases = getattr(self, "_runtime_player_aliases", {})
+        runtime_display_names = self._get_runtime_player_alias_display_names()
+
+        if alias_key in runtime_aliases:
+            removed = runtime_aliases.pop(alias_key)
+            removed_display = runtime_display_names.pop(alias_key, alias_key)
+            self._runtime_player_alias_display_names = runtime_display_names
+            self._save_settings()
+            yield self._plain(
+                event,
+                "\n".join([self._time_line(), f"✅ 已移除动态别名：{removed_display} => {removed}"]),
+            )
+            return
+        if alias_key in config_aliases:
+            yield self._plain(
+                event,
+                "\n".join([self._time_line(), "⚠️ 该别名来自面板配置，请在插件配置中删除"]),
+            )
+            return
+        yield self._plain(event, "\n".join([self._time_line(), f"ℹ️ 未找到别名：{alias_key}"]))
+
+    @filter.command("apex绑定", alias={"apexbind"})
+    async def apexbind(self, event: AstrMessageEvent, target: str = ""):
+        """绑定当前 QQ 用户默认查询的 Apex 玩家，绑定后可直接使用 /apex查询。"""
+        deny = self._guard_access(event)
+        if deny:
+            yield self._plain(event, "\n".join([self._time_line(), deny]))
+            return
+        if not self._aliases_enabled():
+            yield self._plain(event, "\n".join([self._time_line(), "⚠️ 别名功能已关闭"]))
+            return
+
+        raw_target = (self._extract_command_args(event) or str(target or "")).strip()
+        action = raw_target.strip().lower()
+        bindings = getattr(self, "_runtime_user_bindings", {})
+
+        if action in {"list", "ls", "查看", "列表"}:
+            yield self._binding_list_response(event, bindings)
+            return
+
+        user_id = self._get_user_id(event)
+        if not user_id:
+            yield self._plain(event, "\n".join([self._time_line(), "⚠️ 无法识别当前用户，暂不能绑定"]))
+            return
+
+        if action in {"remove", "del", "delete", "rm", "clear", "解绑", "清除", "删除", "移除"}:
+            yield self._remove_current_user_binding_response(event)
+            return
+
+        if not raw_target:
+            current = bindings.get(user_id, "")
+            if current:
+                yield self._plain(
+                    event,
+                    "\n".join([self._time_line(), f"🔖 你的 Apex 查询绑定：{current}"]),
+                )
+            else:
+                yield self._plain(
+                    event,
+                    "\n".join(
+                        [
+                            self._time_line(),
+                            "ℹ️ 你还没有绑定 Apex 查询目标",
+                            "用法：/apex绑定 <玩家名|uid:...> [平台]",
+                            "例：/apex绑定 uid:1234  或  /apex绑定 PlayerName pc",
+                        ]
+                    ),
+                )
+            return
+
+        normalized_target = self._normalize_binding_target(raw_target)
+        identifier_text, _ = self._parse_alias_target_platform(normalized_target)
+        identifier, _ = self._parse_identifier(identifier_text)
+        if not identifier:
+            yield self._plain(
+                event,
+                "\n".join([self._time_line(), "⚠️ 请提供有效的玩家名或 UID，例如：/apex绑定 uid:1234"]),
+            )
+            return
+
+        bindings[user_id] = normalized_target
+        self._runtime_user_bindings = bindings
+        self._save_settings()
+        yield self._plain(
+            event,
+            "\n".join(
+                [
+                    self._time_line(),
+                    f"✅ 已绑定你的 Apex 查询目标：{normalized_target}",
+                    "之后直接发送 /apex查询 即可查询该玩家",
+                ]
+            ),
+        )
+
+    @filter.command("apex绑定列表", alias={"apexbindlist"})
+    async def apexbindinglist(self, event: AstrMessageEvent):
+        """查看 QQ 用户与 Apex 查询目标的个人绑定列表。"""
+        deny = self._guard_access(event)
+        if deny:
+            yield self._plain(event, "\n".join([self._time_line(), deny]))
+            return
+        if not self._aliases_enabled():
+            yield self._plain(event, "\n".join([self._time_line(), "⚠️ 别名功能已关闭"]))
+            return
+
+        bindings = getattr(self, "_runtime_user_bindings", {})
+        yield self._binding_list_response(event, bindings)
+
+    @filter.command("apex解绑", alias={"apexunbind", "取消绑定", "解除绑定"})
+    async def apexunbind(self, event: AstrMessageEvent):
+        """解除当前 QQ 用户自己的 Apex 默认查询绑定。"""
+        deny = self._guard_access(event)
+        if deny:
+            yield self._plain(event, "\n".join([self._time_line(), deny]))
+            return
+        if not self._aliases_enabled():
+            yield self._plain(event, "\n".join([self._time_line(), "⚠️ 别名功能已关闭"]))
+            return
+
+        yield self._remove_current_user_binding_response(event)
 
     @filter.command("apex监控")
     async def apexrankwatch_cn(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
@@ -1975,6 +2707,7 @@ class Main(Star):
             player_data = result.player_data
             if player_data is None:
                 continue
+            self._apply_record_alias_to_player_data(player_data, player)
 
             new_score = player_data.rank_score
             old_score = player.rank_score
@@ -2005,11 +2738,12 @@ class Main(Star):
                     if player.rank_div
                     else player.rank_name
                 )
+                display_name = self._record_display_name(player)
 
                 message_lines = [
                     "📈 Apex 排位分数变化",
                     f"🕒 时间: {date_str}",
-                    f"👤 玩家: {player.player_name}",
+                    f"👤 玩家: {display_name}",
                     f"🖥️ 平台: {self._format_platform(platform)}",
                     f"🔢 原分数: {old_score}",
                     f"🔢 当前分数: {new_score}",
@@ -2092,11 +2826,21 @@ class Main(Star):
             "📊 Apex 段位信息",
             f"🕒 时间: {date_str}",
             f"👤 玩家: {player_data.name}",
-            f"🖥️ 平台: {self._format_platform(player_data.platform)}",
-            f"🆔 UID: {player_data.uid}" if player_data.uid else "🆔 UID: 未知",
-            f"🏆 段位: {rank_display}",
-            f"🔢 分数: {player_data.rank_score}",
         ]
+        display_alias = str(getattr(player_data, "display_alias", "") or "").strip()
+        alias_target = str(getattr(player_data, "alias_target", "") or "").strip()
+        if display_alias:
+            lines.append(f"🔖 查询别名: {display_alias}")
+            if alias_target:
+                lines.append(f"🎯 别名目标: {alias_target}")
+        lines.extend(
+            [
+                f"🖥️ 平台: {self._format_platform(player_data.platform)}",
+                f"🆔 UID: {player_data.uid}" if player_data.uid else "🆔 UID: 未知",
+                f"🏆 段位: {rank_display}",
+                f"🔢 分数: {player_data.rank_score}",
+            ]
+        )
 
         if player_data.global_rank_percent and player_data.global_rank_percent != "未知":
             lines.append(f"🌎 全球排名: {player_data.global_rank_percent}%")
@@ -2120,6 +2864,8 @@ class Main(Star):
             "——",
             "【查询】",
             "🔎 /apexrank <玩家|uid:...> [平台]  别名：/apex查询 /视奸",
+            "🔖 /apex绑定 <玩家|uid:...> [平台]  绑定后 /apex查询 可直接查自己",
+            "🔖 /apex绑定 list / /apex绑定列表 / /apex解绑  查看或取消个人绑定",
             "例：/apexrank PlayerName pc",
             "——",
             "【监控（群聊）】",
@@ -2138,6 +2884,9 @@ class Main(Star):
             "——",
             "【管理】",
             "🚫 /apexblacklist <add|remove|list|clear> <玩家ID>  别名：/apex黑名单 /不准视奸 /apexban",
+            "🔖 /apexalias add <别名> <玩家|uid:...> [平台]  别名：/apex别名",
+            "🔖 /apexalias remove <别名> / /apex取消别名 <别名>",
+            "🔖 /apexalias list 仅展示配置别名和动态别名",
             "🧩 /apex_download  检测中文字体并在缺失时下载字体缓存",
             "——",
             "【参数】",
@@ -2200,7 +2949,8 @@ class Main(Star):
                 "查询",
                 [
                     ("🔎 /apexrank 玩家 [平台]", "查询玩家段位、分数、在线状态"),
-                    ("🔎 /apex查询 /视奸", "中文别名，默认 PC，支持 uid:"),
+                    ("🔎 /apex查询 /视奸", "中文别名，支持 uid: 和查询别名"),
+                    ("🔖 /apex绑定 玩家或 uid:...", "绑定默认查询；list 查看，/apex解绑取消"),
                 ],
             ),
             (
@@ -2231,6 +2981,7 @@ class Main(Star):
                 [
                     ("🚫 /apexblacklist add 玩家ID", "加入动态黑名单"),
                     ("🚫 /apexblacklist list", "查看配置与动态黑名单"),
+                    ("🔖 /apexalias add/list/remove", "管理全局查询别名"),
                     ("🔁 /赛季关闭 /赛季开启", "管理本群赛季关键词回复"),
                     ("🧩 /apex_download", "检测或下载中文字体缓存"),
                 ],
@@ -2252,6 +3003,7 @@ class Main(Star):
         rows = [
             ("平台", "PC / PS4 / X1 / SWITCH；PC 无数据会自动尝试其他平台"),
             ("UID", "使用 uid: 或 uuid: 前缀，例如 /apexrank uid:000000"),
+            ("查询别名", "全局别名和个人绑定分开管理；绑定可用 /apex查询"),
             ("监控间隔", f"{getattr(self._config, 'check_interval', 2)} 分钟"),
             ("最小有效分", f"{getattr(self._config, 'min_valid_score', 1)} 分"),
             ("异常分数", "仅当高分掉到接近 0 分时判定为异常"),
@@ -2263,6 +3015,284 @@ class Main(Star):
         if query_blocklist:
             rows.append(("禁止查询", f"已设置 {len(_split_csv(query_blocklist))} 个玩家ID"))
         return rows
+
+    def _render_alias_list_image(self, alias_entries: list[tuple[str, str, str]]) -> Path:
+        if Image is None:
+            raise RuntimeError("缺少 Pillow，无法生成查询别名列表图片")
+
+        output_dir = self._generated_card_output_dir("alias_list_cards")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        image = self._build_alias_list_card(alias_entries)
+        output_path = output_dir / f"alias_list_{now_epoch_ms()}.png"
+        image.save(output_path, format="PNG", optimize=True)
+        self._cleanup_generated_images(output_dir, "alias_list_*.png", keep=10)
+        return output_path
+
+    def _render_binding_list_image(self, binding_entries: list[tuple[str, str, str]]) -> Path:
+        if Image is None:
+            raise RuntimeError("缺少 Pillow，无法生成查询绑定列表图片")
+
+        output_dir = self._generated_card_output_dir("binding_list_cards")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        image = self._build_binding_list_card(binding_entries)
+        output_path = output_dir / f"binding_list_{now_epoch_ms()}.png"
+        image.save(output_path, format="PNG", optimize=True)
+        self._cleanup_generated_images(output_dir, "binding_list_*.png", keep=10)
+        return output_path
+
+    def _build_alias_list_card(self, alias_entries: list[tuple[str, str, str]]):
+        width = self._MONITOR_LIST_CARD_WIDTH
+        shown_entries = alias_entries[: self._MONITOR_LIST_ROW_LIMIT]
+        row_height = 104
+        row_gap = 14
+        footer_height = 92
+        list_top = 366
+        height = max(
+            760,
+            list_top + max(1, len(shown_entries)) * (row_height + row_gap) + footer_height,
+        )
+        canvas = Image.new("RGBA", (width, height), (7, 8, 11, 255))
+        draw = ImageDraw.Draw(canvas)
+        self._draw_rank_change_background(canvas)
+        self._draw_rank_change_outer_frame(draw, width, height)
+        self._draw_alias_list_header(canvas, draw, len(alias_entries))
+        self._draw_alias_list_summary(draw, alias_entries)
+
+        y = list_top
+        if shown_entries:
+            for index, entry in enumerate(shown_entries, start=1):
+                self._draw_alias_list_row(draw, (54, y, width - 54, y + row_height), index, entry)
+                y += row_height + row_gap
+        else:
+            self._draw_alias_empty_row(draw, (54, y, width - 54, y + row_height))
+
+        footer_text = "动态别名优先覆盖面板配置中的同名别名"
+        if len(alias_entries) > len(shown_entries):
+            footer_text = f"已展示前 {len(shown_entries)} 个，还有 {len(alias_entries) - len(shown_entries)} 个别名未展示"
+        footer_font = self._fit_font(draw, footer_text, 28, 20, width - 150, bold=True)
+        self._draw_centered_stroked_text(
+            draw,
+            footer_text,
+            footer_font,
+            54,
+            width - 54,
+            height - 84,
+            height - 40,
+            (202, 210, 220, 255),
+        )
+        return canvas.convert("RGB")
+
+    def _build_binding_list_card(self, binding_entries: list[tuple[str, str, str]]):
+        width = self._MONITOR_LIST_CARD_WIDTH
+        shown_entries = binding_entries[: self._MONITOR_LIST_ROW_LIMIT]
+        row_height = 104
+        row_gap = 14
+        footer_height = 92
+        list_top = 366
+        height = max(
+            760,
+            list_top + max(1, len(shown_entries)) * (row_height + row_gap) + footer_height,
+        )
+        canvas = Image.new("RGBA", (width, height), (7, 8, 11, 255))
+        draw = ImageDraw.Draw(canvas)
+        self._draw_rank_change_background(canvas)
+        self._draw_rank_change_outer_frame(draw, width, height)
+        self._draw_binding_list_header(canvas, draw, len(binding_entries))
+        self._draw_binding_list_summary(draw, binding_entries)
+
+        y = list_top
+        if shown_entries:
+            for index, entry in enumerate(shown_entries, start=1):
+                self._draw_alias_list_row(draw, (54, y, width - 54, y + row_height), index, entry)
+                y += row_height + row_gap
+        else:
+            self._draw_binding_empty_row(draw, (54, y, width - 54, y + row_height))
+
+        footer_text = "绑定只影响对应 QQ 用户直接发送 /apex查询 的默认目标"
+        if len(binding_entries) > len(shown_entries):
+            footer_text = f"已展示前 {len(shown_entries)} 个，还有 {len(binding_entries) - len(shown_entries)} 个绑定未展示"
+        footer_font = self._fit_font(draw, footer_text, 28, 20, width - 150, bold=True)
+        self._draw_centered_stroked_text(
+            draw,
+            footer_text,
+            footer_font,
+            54,
+            width - 54,
+            height - 84,
+            height - 40,
+            (202, 210, 220, 255),
+        )
+        return canvas.convert("RGB")
+
+    def _draw_alias_list_header(self, canvas, draw, total_aliases: int) -> None:
+        box = (54, 54, 1068, 224)
+        self._draw_rank_panel_base(draw, box, fill=(12, 14, 19, 238), outline_alpha=150)
+        badge = self._apex_logo_badge(118)
+        canvas.alpha_composite(badge, (92, 80))
+
+        title = "Apex 查询别名"
+        subtitle = f"{total_aliases} 个别名 · /apexalias list"
+        title_font = self._fit_font(draw, title, 66, 46, 690, bold=True)
+        subtitle_font = self._fit_font(draw, subtitle, 32, 23, 690, bold=True)
+        self._draw_text_stroked(
+            draw,
+            (254, self._centered_text_y(draw, title, title_font, 78, 146)),
+            title,
+            title_font,
+            fill=(250, 250, 246, 255),
+        )
+        self._draw_text_stroked(
+            draw,
+            (254, self._centered_text_y(draw, subtitle, subtitle_font, 150, 202)),
+            subtitle,
+            subtitle_font,
+            fill=(205, 212, 222, 255),
+        )
+        draw.rectangle((760, 214, 930, 220), fill=(236, 48, 52, 220))
+
+    def _draw_binding_list_header(self, canvas, draw, total_bindings: int) -> None:
+        box = (54, 54, 1068, 224)
+        self._draw_rank_panel_base(draw, box, fill=(12, 14, 19, 238), outline_alpha=150)
+        badge = self._apex_logo_badge(118)
+        canvas.alpha_composite(badge, (92, 80))
+
+        title = "Apex 查询绑定"
+        subtitle = f"{total_bindings} 个绑定 · /apex绑定 list"
+        title_font = self._fit_font(draw, title, 66, 46, 690, bold=True)
+        subtitle_font = self._fit_font(draw, subtitle, 32, 23, 690, bold=True)
+        self._draw_text_stroked(
+            draw,
+            (254, self._centered_text_y(draw, title, title_font, 78, 146)),
+            title,
+            title_font,
+            fill=(250, 250, 246, 255),
+        )
+        self._draw_text_stroked(
+            draw,
+            (254, self._centered_text_y(draw, subtitle, subtitle_font, 150, 202)),
+            subtitle,
+            subtitle_font,
+            fill=(205, 212, 222, 255),
+        )
+        draw.rectangle((760, 214, 930, 220), fill=(236, 48, 52, 220))
+
+    def _draw_alias_list_summary(self, draw, alias_entries: list[tuple[str, str, str]]) -> None:
+        config_count = sum(1 for _, _, source in alias_entries if str(source).startswith("配置"))
+        runtime_count = sum(1 for _, _, source in alias_entries if str(source).startswith("动态"))
+        panels = [
+            ((54, 244, 370, 338), "配置别名", f"{config_count} 个"),
+            ((388, 244, 734, 338), "动态别名", f"{runtime_count} 个"),
+            ((752, 244, 1068, 338), "列表总数", f"{len(alias_entries)} 个"),
+        ]
+        for box, label, value in panels:
+            self._draw_mini_info_pill(draw, box, label, value)
+
+    def _draw_binding_list_summary(self, draw, binding_entries: list[tuple[str, str, str]]) -> None:
+        panels = [
+            ((54, 244, 370, 338), "个人绑定", f"{len(binding_entries)} 个"),
+            ((388, 244, 734, 338), "查询命令", "/apex查询"),
+            ((752, 244, 1068, 338), "解除绑定", "/apex解绑"),
+        ]
+        for box, label, value in panels:
+            self._draw_mini_info_pill(draw, box, label, value)
+
+    def _draw_alias_empty_row(self, draw, box: tuple[int, int, int, int]) -> None:
+        self._draw_rank_panel_base(draw, box, fill=(13, 16, 21, 240), outline_alpha=92)
+        text = "暂无查询别名"
+        font = self._fit_font(draw, text, 34, 24, box[2] - box[0] - 80, bold=True)
+        self._draw_centered_stroked_text(
+            draw,
+            text,
+            font,
+            box[0] + 30,
+            box[2] - 30,
+            box[1] + 18,
+            box[3] - 18,
+            (205, 212, 222, 255),
+        )
+
+    def _draw_binding_empty_row(self, draw, box: tuple[int, int, int, int]) -> None:
+        self._draw_rank_panel_base(draw, box, fill=(13, 16, 21, 240), outline_alpha=92)
+        text = "暂无查询绑定"
+        font = self._fit_font(draw, text, 34, 24, box[2] - box[0] - 80, bold=True)
+        self._draw_centered_stroked_text(
+            draw,
+            text,
+            font,
+            box[0] + 30,
+            box[2] - 30,
+            box[1] + 18,
+            box[3] - 18,
+            (205, 212, 222, 255),
+        )
+
+    def _draw_alias_list_row(
+        self,
+        draw,
+        box: tuple[int, int, int, int],
+        index: int,
+        entry: tuple[str, str, str],
+    ) -> None:
+        alias, target, source = entry
+        self._draw_rank_panel_base(draw, box, fill=(13, 16, 21, 240), outline_alpha=92)
+
+        index_box = (box[0] + 22, box[1] + 26, box[0] + 74, box[1] + 78)
+        draw.rounded_rectangle(index_box, radius=10, fill=(236, 48, 52, 225))
+        index_font = self._font(25, bold=True)
+        self._draw_centered_stroked_text(
+            draw,
+            str(index),
+            index_font,
+            index_box[0],
+            index_box[2],
+            index_box[1],
+            index_box[3],
+            (255, 255, 255, 255),
+            stroke_width=1,
+        )
+
+        alias_text = str(alias or "未知别名")
+        target_text = str(target or "未知目标")
+        source_text = str(source or "未知")
+        alias_font = self._fit_font(draw, alias_text, 34, 24, 320, bold=True)
+        target_font = self._fit_font(draw, target_text, 28, 19, 500)
+        source_font = self._fit_font(draw, source_text, 26, 18, 110, bold=True)
+
+        text_left = box[0] + 100
+        self._draw_text_stroked(
+            draw,
+            (text_left, box[1] + 18),
+            alias_text,
+            alias_font,
+            fill=(250, 250, 246, 255),
+        )
+        self._draw_text_stroked(
+            draw,
+            (text_left, box[1] + 60),
+            f"目标：{target_text}",
+            target_font,
+            fill=(190, 198, 210, 255),
+        )
+
+        badge_box = (box[2] - 160, box[1] + 30, box[2] - 42, box[1] + 74)
+        if source_text.startswith("动态"):
+            badge_fill = (236, 48, 52, 225)
+        elif source_text.startswith("个人"):
+            badge_fill = (58, 135, 92, 225)
+        else:
+            badge_fill = (60, 92, 130, 225)
+        draw.rounded_rectangle(badge_box, radius=12, fill=badge_fill)
+        self._draw_centered_stroked_text(
+            draw,
+            source_text,
+            source_font,
+            badge_box[0],
+            badge_box[2],
+            badge_box[1],
+            badge_box[3],
+            (255, 255, 255, 255),
+            stroke_width=1,
+        )
 
     def _draw_help_card_header(self, canvas, draw) -> None:
         box = (54, 54, 1068, 224)
@@ -2342,7 +3372,7 @@ class Main(Star):
         for index, player in enumerate(players, start=1):
             rank_display = self._record_rank_display(player)
             platform = getattr(player, "platform", "PC") or "PC"
-            response_lines.append(f"👤 玩家 {index}: {player.player_name}")
+            response_lines.append(f"👤 玩家 {index}: {self._record_display_name(player)}")
             response_lines.append(f"🖥️ 平台: {self._format_platform(platform)}")
             response_lines.append(f"🏆 段位: {rank_display}")
             response_lines.append(f"🔢 分数: {player.rank_score}")
@@ -2483,7 +3513,7 @@ class Main(Star):
             self._draw_icon_octagon(draw, icon_box)
             self._draw_rank_icon(draw, "target", icon_box)
 
-        name = str(getattr(player, "player_name", "") or "未知玩家")
+        name = self._record_display_name(player)
         platform = self._format_platform(getattr(player, "platform", "PC") or "PC")
         checked_at = self._format_record_checked_at(getattr(player, "last_checked", 0))
         rank_text = self._record_rank_display(player)
@@ -2885,9 +3915,14 @@ class Main(Star):
             self._draw_rank_icon(draw, "player", avatar_box)
 
         label_font = self._font(30, bold=True)
-        name = player_data.name or "未知"
+        alias_name = str(getattr(player_data, "display_alias", "") or "").strip()
+        actual_name = player_data.name or "未知"
+        name = alias_name or actual_name
         name_font = self._fit_font(draw, name, 54, 34, box[2] - box[0] - 245, bold=True)
-        uid_text = f"UID {player_data.uid}" if player_data.uid else "UID 未知"
+        if alias_name and actual_name and alias_name.lower() != actual_name.lower():
+            uid_text = f"{actual_name} · UID {player_data.uid}" if player_data.uid else actual_name
+        else:
+            uid_text = f"UID {player_data.uid}" if player_data.uid else "UID 未知"
         uid_font = self._fit_font(draw, uid_text, 27, 20, box[2] - box[0] - 245)
         text_left = box[0] + 220
         text_right = box[2] - 24
@@ -3067,7 +4102,7 @@ class Main(Star):
             (54, 360, 388, 670),
             "player",
             "玩家",
-            player_data.name or "未知",
+            self._player_data_display_name(player_data),
         )
         self._draw_rank_info_panel(
             draw,
@@ -5226,7 +6261,9 @@ class Main(Star):
         draw.text((x + 2, y + 2), text, font=font, fill=(0, 0, 0, 180))
         draw.text((x, y), text, font=font, fill=fill)
 
-    def _render_predator_info_image(self, predator_info: PredatorInfo) -> Path:
+    def _render_predator_info_image(
+        self, predator_info: PredatorInfo, selected_platform: str = ""
+    ) -> Path:
         if Image is None:
             raise RuntimeError("缺少 Pillow，无法生成猎杀线图片")
         if not self._PREDATOR_TEMPLATE_PATH.exists():
@@ -5273,7 +6310,7 @@ class Main(Star):
         cache[cache_key] = (time.monotonic(), Path(image_path))
 
     def _predator_info_image_cache_key(
-        self, output_dir: Path, predator_info: PredatorInfo
+        self, output_dir: Path, predator_info: PredatorInfo, selected_platform: str = ""
     ) -> tuple:
         platform_key = []
         for platform in ("PC", "PS4", "X1", "SWITCH"):
@@ -5314,16 +6351,18 @@ class Main(Star):
         except Exception as exc:
             logger.debug(f"清理猎杀线缓存图片失败: {exc}")
 
-    def _build_predator_info_card(self, predator_info: PredatorInfo):
+    def _build_predator_info_card(
+        self, predator_info: PredatorInfo, selected_platform: str = ""
+    ):
         with Image.open(self._PREDATOR_TEMPLATE_PATH) as raw:
             canvas = raw.convert("RGBA")
         draw = ImageDraw.Draw(canvas)
 
-        # 模板来自用户提供的固定版式，这里只在预留黑框内写入实时数据。
+        # 模板来自旧版固定版式，这里只在预留黑框内写入实时数据。
         query_text = self._now_str()
         time_font = self._fit_font(draw, query_text, 38, 28, 350, bold=True)
         update_text = self._format_predator_update_time(
-            self._select_predator_platforms(predator_info)
+            self._select_predator_platforms(predator_info, "")
         ) or "暂无"
         update_font = self._fit_font(draw, update_text, 38, 28, 350, bold=True)
         value_fill = self._PREDATOR_NEUTRAL

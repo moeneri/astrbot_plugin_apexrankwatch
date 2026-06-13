@@ -6,6 +6,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -91,6 +93,19 @@ def _sample_player(main_module):
     )
 
 
+def _plugin_config(main_module, **overrides):
+    raw = {
+        "api_key": "key",
+        "min_valid_score": 1,
+        "output_mode": "text",
+        "player_aliases": "",
+        "alias_enabled": True,
+        "alias_admin_only": True,
+    }
+    raw.update(overrides)
+    return main_module.PluginConfig.from_raw(raw)
+
+
 def _blank_name_uid_payload():
     return {
         "global": {
@@ -123,6 +138,69 @@ def test_output_mode_defaults_to_image_and_accepts_text():
     assert default_config.output_mode == "image"
     assert text_config.output_mode == "text"
     assert invalid_config.output_mode == "image"
+
+
+def test_player_alias_config_is_parsed_from_panel_string():
+    main_module = _load_main_module()
+
+    config = main_module.PluginConfig.from_raw(
+        {
+            "player_aliases": "测试=uid:1234,小明=EaName pc",
+            "alias_admin_only": False,
+        }
+    )
+    plugin = object.__new__(main_module.Main)
+    plugin._config = config
+    plugin._runtime_player_aliases = {}
+
+    assert config.alias_admin_only is False
+    assert config.alias_enabled is True
+    assert plugin._get_player_aliases() == {
+        "测试": "uid:1234",
+        "小明": "EaName pc",
+    }
+
+
+def test_player_alias_switch_can_disable_alias_resolution():
+    main_module = _load_main_module()
+
+    config = main_module.PluginConfig.from_raw(
+        {
+            "player_aliases": "测试=uid:1234",
+            "alias_enabled": False,
+        }
+    )
+    plugin = object.__new__(main_module.Main)
+    plugin._config = config
+    plugin._runtime_player_aliases = {}
+
+    assert config.alias_enabled is False
+    assert plugin._resolve_player_alias("测试", "") == ("测试", "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "apexrank",
+        "apex查询",
+        "视奸",
+        "apexrankwatch",
+        "apex监控",
+        "持续视奸",
+        "apexrankremove",
+        "apex移除",
+        "取消持续视奸",
+        "apex绑定",
+    ],
+)
+def test_player_alias_commands_strip_command_name(command):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+
+    class _Event:
+        message_str = f"/{command} 测试"
+
+    assert plugin._extract_command_args(_Event()) == "测试"
 
 
 def test_player_rank_text_mode_does_not_render_image(monkeypatch):
@@ -228,6 +306,1106 @@ def test_cn_query_uid_command_accepts_api_response_with_blank_player_name(monkey
     assert "1007669673322" in result[0][1]
     assert "5933" in result[0][1]
     assert "黄金 4" in result[0][1]
+
+
+def test_apexrank_uses_configured_alias_target_for_query(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(
+        main_module,
+        player_aliases="测试=uid:1007669673322",
+    )
+
+    calls = []
+
+    async def fake_fetch(identifier, platform, use_uid):
+        calls.append((identifier, platform, use_uid))
+        return _sample_player(main_module), "PC"
+
+    plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
+    plugin._runtime_player_aliases = {}
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_is_blacklisted", lambda player: False)
+    monkeypatch.setattr(plugin, "_is_query_blocked", lambda player: False)
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+    monkeypatch.setattr(plugin, "_image", lambda event, path: ("image", path))
+
+    class _Event:
+        message_str = "/apexrank 测试"
+
+    async def collect():
+        return [item async for item in plugin.apexrank(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert calls == [("1007669673322", "", True)]
+
+
+def test_apexrank_blocks_blacklisted_raw_alias_before_fetch(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(
+        main_module,
+        player_aliases="BlockedAlias=uid:1007669673322",
+        blacklist="BlockedAlias",
+    )
+    plugin._runtime_blacklist = set()
+    plugin._runtime_player_aliases = {}
+
+    async def fake_fetch(identifier, platform, use_uid):
+        raise AssertionError("blacklisted raw alias should not reach the API")
+
+    plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apexrank BlockedAlias"
+
+    async def collect():
+        return [item async for item in plugin.apexrank(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert "禁止查询" in result[0][1]
+
+
+def test_apexrank_alias_metadata_is_attached_for_image_render(monkeypatch, tmp_path):
+    main_module = _load_main_module()
+    image_path = tmp_path / "rank.png"
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(
+        main_module,
+        output_mode="image",
+        player_aliases="TestAlias=uid:1007669673322",
+    )
+    plugin._runtime_player_aliases = {}
+
+    rendered_aliases = []
+
+    async def fake_fetch(identifier, platform, use_uid):
+        assert (identifier, platform, use_uid) == ("1007669673322", "", True)
+        return _sample_player(main_module), "PC"
+
+    def fake_render(player):
+        rendered_aliases.append(
+            (
+                getattr(player, "display_alias", ""),
+                getattr(player, "alias_target", ""),
+            )
+        )
+        return image_path
+
+    plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_is_blacklisted", lambda player: False)
+    monkeypatch.setattr(plugin, "_is_query_blocked", lambda player: False)
+    monkeypatch.setattr(plugin, "_render_player_rank_image", fake_render)
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+    monkeypatch.setattr(plugin, "_image", lambda event, path: ("image", path))
+
+    class _Event:
+        message_str = "/apexrank TestAlias"
+
+    async def collect():
+        return [item async for item in plugin.apexrank(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result == [("image", image_path)]
+    assert rendered_aliases == [("TestAlias", "uid:1007669673322")]
+
+
+def test_apexrank_alias_metadata_is_shown_in_text_mode(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(
+        main_module,
+        output_mode="text",
+        player_aliases="TestAlias=uid:1007669673322",
+    )
+    plugin._runtime_player_aliases = {}
+
+    async def fake_fetch(identifier, platform, use_uid):
+        assert (identifier, platform, use_uid) == ("1007669673322", "", True)
+        return _sample_player(main_module), "PC"
+
+    plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_is_blacklisted", lambda player: False)
+    monkeypatch.setattr(plugin, "_is_query_blocked", lambda player: False)
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apexrank TestAlias"
+
+    async def collect():
+        return [item async for item in plugin.apexrank(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert "🔖 查询别名: TestAlias" in result[0][1]
+    assert "👤 玩家: yumola" in result[0][1]
+
+
+def test_apexrank_without_name_uses_user_binding(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module)
+    plugin._runtime_player_aliases = {}
+    plugin._runtime_user_bindings = {"10001": "uid:1007669673322"}
+
+    calls = []
+
+    async def fake_fetch(identifier, platform, use_uid):
+        calls.append((identifier, platform, use_uid))
+        return _sample_player(main_module), "PC"
+
+    plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_is_blacklisted", lambda player: False)
+    monkeypatch.setattr(plugin, "_is_query_blocked", lambda player: False)
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apex查询"
+        user_id = "10001"
+
+    async def collect():
+        return [item async for item in plugin.apexrank_query_cn(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert calls == [("1007669673322", "", True)]
+    assert "🔖 查询别名: 我的绑定" in result[0][1]
+
+
+@pytest.mark.parametrize(
+    ("message", "method_name"),
+    [
+        ("/apex查询 测试", "apexrank_query_cn"),
+        ("/视奸 测试", "apexrank_query_cn_alt"),
+    ],
+)
+def test_cn_query_commands_use_configured_alias_target(monkeypatch, message, method_name):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(
+        main_module,
+        player_aliases="测试=uid:1007669673322",
+    )
+
+    calls = []
+
+    async def fake_fetch(identifier, platform, use_uid):
+        calls.append((identifier, platform, use_uid))
+        return _sample_player(main_module), "PC"
+
+    plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
+    plugin._runtime_player_aliases = {}
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_is_blacklisted", lambda player: False)
+    monkeypatch.setattr(plugin, "_is_query_blocked", lambda player: False)
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+    monkeypatch.setattr(plugin, "_image", lambda event, path: ("image", path))
+
+    class _Event:
+        message_str = message
+
+    async def collect():
+        method = getattr(plugin, method_name)
+        return [item async for item in method(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert calls == [("1007669673322", "", True)]
+
+
+def test_apexrankwatch_uses_configured_alias_target_for_monitor(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(
+        main_module,
+        player_aliases="测试=uid:1007669673322",
+    )
+
+    calls = []
+
+    async def fake_fetch(identifier, platform, use_uid):
+        calls.append((identifier, platform, use_uid))
+        return _sample_player(main_module), "PC"
+
+    class _Store:
+        def __init__(self):
+            self.saved_record = None
+
+        def ensure_group(self, group_id, origin):
+            return types.SimpleNamespace(players={})
+
+        def set_player(self, group_id, player_key, record):
+            self.saved_record = (group_id, player_key, record)
+
+        def save(self):
+            pass
+
+    store = _Store()
+    plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
+    plugin._runtime_player_aliases = {}
+    plugin._store = store
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event, require_group=False: "")
+    monkeypatch.setattr(plugin, "_get_group_id", lambda event: "group-1")
+    monkeypatch.setattr(plugin, "_is_blacklisted", lambda player: False)
+    monkeypatch.setattr(plugin, "_is_query_blocked", lambda player: False)
+    monkeypatch.setattr(plugin, "_send_active_message", lambda origin, message: _async_return(True))
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+    monkeypatch.setattr(plugin, "_image", lambda event, path: ("image", path))
+
+    class _Event:
+        message_str = "/apexrankwatch 测试"
+        unified_msg_origin = "origin-1"
+
+    async def collect():
+        return [item async for item in plugin.apexrankwatch(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert calls == [("1007669673322", "", True)]
+    assert store.saved_record[1] == "uid:1007669673322@PC"
+
+
+def test_apexrankwatch_blocks_query_blocked_raw_alias_before_fetch(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(
+        main_module,
+        player_aliases="BlockedAlias=uid:1007669673322",
+        query_blocklist="BlockedAlias",
+    )
+    plugin._runtime_blacklist = set()
+    plugin._runtime_player_aliases = {}
+
+    async def fake_fetch(identifier, platform, use_uid):
+        raise AssertionError("query-blocked raw alias should not reach the API")
+
+    plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event, require_group=False: "")
+    monkeypatch.setattr(plugin, "_get_group_id", lambda event: "group-1")
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apexrankwatch BlockedAlias"
+        unified_msg_origin = "origin-1"
+
+    async def collect():
+        return [item async for item in plugin.apexrankwatch(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert "禁止监控" in result[0][1]
+
+
+def test_apexrankwatch_stores_alias_display_for_monitor(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(
+        main_module,
+        player_aliases="TestAlias=uid:1007669673322",
+    )
+
+    async def fake_fetch(identifier, platform, use_uid):
+        assert (identifier, platform, use_uid) == ("1007669673322", "", True)
+        return _sample_player(main_module), "PC"
+
+    class _Store:
+        def __init__(self):
+            self.saved_record = None
+
+        def ensure_group(self, group_id, origin):
+            return types.SimpleNamespace(players={})
+
+        def set_player(self, group_id, player_key, record):
+            self.saved_record = record
+
+        def save(self):
+            pass
+
+    store = _Store()
+    plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
+    plugin._runtime_player_aliases = {}
+    plugin._store = store
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event, require_group=False: "")
+    monkeypatch.setattr(plugin, "_get_group_id", lambda event: "group-1")
+    monkeypatch.setattr(plugin, "_is_blacklisted", lambda player: False)
+    monkeypatch.setattr(plugin, "_is_query_blocked", lambda player: False)
+    monkeypatch.setattr(plugin, "_send_active_message", lambda origin, message: _async_return(True))
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apexrankwatch TestAlias"
+        unified_msg_origin = "origin-1"
+
+    async def collect():
+        return [item async for item in plugin.apexrankwatch(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert store.saved_record.display_alias == "TestAlias"
+    assert "成功添加对 TestAlias（yumola）" in result[0][1]
+
+
+@pytest.mark.parametrize(
+    ("message", "method_name"),
+    [
+        ("/apex监控 测试", "apexrankwatch_cn"),
+        ("/持续视奸 测试", "apexrankwatch_cn_alt"),
+    ],
+)
+def test_cn_apexrankwatch_alias_uses_configured_alias_target(monkeypatch, message, method_name):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(
+        main_module,
+        player_aliases="测试=uid:1007669673322",
+    )
+
+    calls = []
+
+    async def fake_fetch(identifier, platform, use_uid):
+        calls.append((identifier, platform, use_uid))
+        return _sample_player(main_module), "PC"
+
+    class _Store:
+        def ensure_group(self, group_id, origin):
+            return types.SimpleNamespace(players={})
+
+        def set_player(self, group_id, player_key, record):
+            pass
+
+        def save(self):
+            pass
+
+    plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
+    plugin._runtime_player_aliases = {}
+    plugin._store = _Store()
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event, require_group=False: "")
+    monkeypatch.setattr(plugin, "_get_group_id", lambda event: "group-1")
+    monkeypatch.setattr(plugin, "_is_blacklisted", lambda player: False)
+    monkeypatch.setattr(plugin, "_is_query_blocked", lambda player: False)
+    monkeypatch.setattr(plugin, "_send_active_message", lambda origin, message: _async_return(True))
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+    monkeypatch.setattr(plugin, "_image", lambda event, path: ("image", path))
+
+    class _Event:
+        message_str = message
+        unified_msg_origin = "origin-1"
+
+    async def collect():
+        method = getattr(plugin, method_name)
+        return [item async for item in method(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert calls == [("1007669673322", "", True)]
+
+
+@pytest.mark.parametrize(
+    ("message", "method_name"),
+    [
+        ("/apexrankremove 测试", "apexrankremove"),
+        ("/apex移除 测试", "apexrankremove_cn"),
+        ("/取消持续视奸 测试", "apexrankremove_cn_alt"),
+    ],
+)
+def test_remove_watch_commands_use_configured_alias_target(monkeypatch, message, method_name):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(
+        main_module,
+        player_aliases="测试=uid:1007669673322",
+    )
+    plugin._runtime_player_aliases = {}
+
+    class _Store:
+        def __init__(self):
+            self.group = types.SimpleNamespace(
+                origin="origin-1",
+                players={"uid:1007669673322@PC": object()},
+            )
+            self.removed = []
+            self.save_calls = 0
+
+        def get_group(self, group_id):
+            assert group_id == "group-1"
+            return self.group
+
+        def remove_player(self, group_id, player_key):
+            self.removed.append((group_id, player_key))
+            return self.group.players.pop(player_key, None) is not None
+
+        def save(self):
+            self.save_calls += 1
+
+    store = _Store()
+    plugin._store = store
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event, require_group=False: "")
+    monkeypatch.setattr(plugin, "_get_group_id", lambda event: "group-1")
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = message
+        unified_msg_origin = "origin-1"
+
+    async def collect():
+        method = getattr(plugin, method_name)
+        return [item async for item in method(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert store.removed == [("group-1", "uid:1007669673322@PC")]
+    assert store.save_calls == 1
+    assert "已移除本群对 测试（uid:1007669673322） 的排名监控" in result[0][1]
+
+
+def test_rank_watch_list_prefers_alias_display_name():
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module)
+
+    record = main_module.PlayerRecord(
+        player_name="yumola",
+        platform="PC",
+        lookup_id="1007669673322",
+        use_uid=True,
+        rank_score=18888,
+        rank_name="Master",
+        rank_div=0,
+        last_checked=0,
+    )
+    record.display_alias = "TestAlias"
+
+    lines = plugin._build_rank_watch_list_lines([record])
+
+    assert "👤 玩家 1: TestAlias（yumola）" in lines
+
+
+def test_poll_rank_change_image_receives_record_alias(monkeypatch, tmp_path):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="image")
+    plugin._poll_concurrency = 1
+    plugin._poll_semaphore = asyncio.Semaphore(1)
+
+    old_record = main_module.PlayerRecord(
+        player_name="yumola",
+        platform="PC",
+        lookup_id="1007669673322",
+        use_uid=True,
+        rank_score=18000,
+        rank_name="Master",
+        rank_div=0,
+        last_checked=0,
+    )
+    old_record.display_alias = "TestAlias"
+
+    class _Store:
+        def __init__(self):
+            self.save_calls = 0
+
+        def iter_groups(self):
+            return [
+                (
+                    "group-1",
+                    types.SimpleNamespace(origin="origin-1", players={"uid:1007669673322@PC": old_record}),
+                )
+            ]
+
+        def save(self):
+            self.save_calls += 1
+
+    async def fake_fetch(identifier, platform, use_uid):
+        player = _sample_player(main_module)
+        player.rank_score = 18888
+        return player, "PC"
+
+    render_calls = []
+    image_path = tmp_path / "rank-change.png"
+
+    def fake_render(**kwargs):
+        player = kwargs["player_data"]
+        render_calls.append(getattr(player, "display_alias", ""))
+        return image_path
+
+    plugin._store = _Store()
+    plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
+
+    monkeypatch.setattr(plugin, "_is_blacklisted", lambda player: False)
+    monkeypatch.setattr(plugin, "_is_query_blocked", lambda player: False)
+    monkeypatch.setattr(plugin, "_render_rank_change_image", fake_render)
+    monkeypatch.setattr(plugin, "_send_active_image", lambda origin, path: _async_return(True))
+
+    asyncio.run(plugin._poll_once())
+
+    assert render_calls == ["TestAlias"]
+    assert plugin._store.save_calls == 1
+
+
+def test_apexalias_add_command_allows_everyone_when_switch_is_off(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, alias_admin_only=False)
+    plugin._runtime_player_aliases = {}
+    save_calls = []
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_save_settings", lambda: save_calls.append(dict(plugin._runtime_player_aliases)))
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apexalias add 测试 uid:1234"
+
+    async def collect():
+        return [item async for item in plugin.apexalias(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert plugin._runtime_player_aliases == {"测试": "uid:1234"}
+    assert save_calls == [{"测试": "uid:1234"}]
+    assert "已添加别名" in result[0][1]
+
+
+def test_apexalias_preserves_english_alias_display_name(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, alias_admin_only=False)
+    plugin._runtime_player_aliases = {}
+    plugin._runtime_player_alias_display_names = {}
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_save_settings", lambda: None)
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apexalias add MyMain uid:1234"
+
+    async def collect():
+        return [item async for item in plugin.apexalias(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert plugin._runtime_player_aliases == {"mymain": "uid:1234"}
+    assert plugin._runtime_player_alias_display_names == {"mymain": "MyMain"}
+    assert "已添加别名：MyMain => uid:1234" in result[0][1]
+
+
+def test_apexalias_add_command_requires_admin_when_switch_is_on(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, alias_admin_only=True)
+    plugin._runtime_player_aliases = {}
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_guard_admin", lambda event: "ADMIN ONLY")
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apexalias add 测试 uid:1234"
+
+    async def collect():
+        return [item async for item in plugin.apexalias(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert plugin._runtime_player_aliases == {}
+    assert result == [("plain", "TIME\nADMIN ONLY")]
+
+
+def test_apexbind_stores_user_binding_with_uid_slash_prefix(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module)
+    plugin._runtime_user_bindings = {}
+    save_calls = []
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_save_settings", lambda: save_calls.append(dict(plugin._runtime_user_bindings)))
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apex绑定 /uid:1007669673322"
+        user_id = "10001"
+
+    async def collect():
+        return [item async for item in plugin.apexbind(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert plugin._runtime_user_bindings == {"10001": "uid:1007669673322"}
+    assert save_calls == [{"10001": "uid:1007669673322"}]
+    assert "已绑定" in result[0][1]
+    assert "uid:1007669673322" in result[0][1]
+
+
+def test_apexbind_respects_alias_switch(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, alias_enabled=False)
+    plugin._runtime_user_bindings = {}
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_save_settings", lambda: pytest.fail("should not save"))
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apex绑定 uid:1007669673322"
+        user_id = "10001"
+
+    async def collect():
+        return [item async for item in plugin.apexbind(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert plugin._runtime_user_bindings == {}
+    assert "别名功能已关闭" in result[0][1]
+
+
+def test_apexalias_list_image_mode_uses_rendered_alias_list(monkeypatch, tmp_path):
+    main_module = _load_main_module()
+    image_path = tmp_path / "aliases.png"
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(
+        main_module,
+        output_mode="image",
+        player_aliases="测试=uid:1234",
+    )
+    plugin._runtime_player_aliases = {"小明": "EaName pc"}
+    plugin._runtime_user_bindings = {"10001": "uid:1007669673322"}
+    render_calls = []
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_guard_admin", lambda event: None)
+    monkeypatch.setattr(plugin, "_render_alias_list_image", lambda aliases: render_calls.append(aliases) or image_path)
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+    monkeypatch.setattr(plugin, "_image", lambda event, path: ("image", path))
+
+    class _Event:
+        message_str = "/apexalias list"
+
+    async def collect():
+        return [item async for item in plugin.apexalias(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result == [("image", image_path)]
+    assert render_calls == [
+        [
+            ("测试", "uid:1234", "配置（生效）"),
+            ("小明", "EaName pc", "动态（生效）"),
+        ]
+    ]
+
+
+def test_apexalias_help_image_mode_uses_rendered_alias_list(monkeypatch, tmp_path):
+    main_module = _load_main_module()
+    image_path = tmp_path / "aliases.png"
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(
+        main_module,
+        output_mode="image",
+        player_aliases="测试=uid:1234",
+        alias_admin_only=False,
+    )
+    plugin._runtime_player_aliases = {"小明": "EaName pc"}
+    plugin._runtime_user_bindings = {"10001": "uid:1007669673322"}
+    render_calls = []
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_render_alias_list_image", lambda aliases: render_calls.append(aliases) or image_path)
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+    monkeypatch.setattr(plugin, "_image", lambda event, path: ("image", path))
+
+    class _Event:
+        message_str = "/apexalias"
+
+    async def collect():
+        return [item async for item in plugin.apexalias(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result == [("image", image_path)]
+    assert render_calls == [
+        [
+            ("测试", "uid:1234", "配置（生效）"),
+            ("小明", "EaName pc", "动态（生效）"),
+        ]
+    ]
+
+
+def test_apexalias_list_text_mode_does_not_include_user_bindings(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(
+        main_module,
+        output_mode="text",
+        player_aliases="测试=uid:1234",
+        alias_admin_only=False,
+    )
+    plugin._runtime_player_aliases = {"小明": "EaName pc"}
+    plugin._runtime_user_bindings = {"10001": "uid:1007669673322"}
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apexalias list"
+
+    async def collect():
+        return [item async for item in plugin.apexalias(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert "Apex 查询别名列表" in result[0][1]
+    assert "测试=uid:1234" in result[0][1]
+    assert "小明=EaName pc" in result[0][1]
+    assert "个人绑定" not in result[0][1]
+    assert "QQ 10001" not in result[0][1]
+
+
+def test_apexalias_list_marks_runtime_override_and_shows_effective_text(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(
+        main_module,
+        output_mode="text",
+        player_aliases="MyMain=uid:1111",
+        alias_admin_only=False,
+    )
+    plugin._runtime_player_aliases = {"mymain": "uid:2222"}
+    plugin._runtime_player_alias_display_names = {"mymain": "MyMain"}
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apexalias list"
+
+    async def collect():
+        return [item async for item in plugin.apexalias(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert "有效别名：MyMain=uid:2222" in result[0][1]
+    assert "配置别名：MyMain=uid:1111（已被动态覆盖）" in result[0][1]
+    assert "动态别名：MyMain=uid:2222" in result[0][1]
+
+
+def test_apexbind_list_image_mode_uses_rendered_binding_list(monkeypatch, tmp_path):
+    main_module = _load_main_module()
+    image_path = tmp_path / "bindings.png"
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="image")
+    plugin._runtime_user_bindings = {
+        "10001": "uid:1007669673322",
+        "10002": "PlayerName pc",
+    }
+    render_calls = []
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_get_user_id", lambda event: "10001")
+    monkeypatch.setattr(
+        plugin,
+        "_render_binding_list_image",
+        lambda bindings: render_calls.append(bindings) or image_path,
+        raising=False,
+    )
+    monkeypatch.setattr(plugin, "_save_settings", lambda: None)
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+    monkeypatch.setattr(plugin, "_image", lambda event, path: ("image", path))
+
+    class _Event:
+        message_str = "/apex绑定 list"
+
+    async def collect():
+        return [item async for item in plugin.apexbind(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result == [("image", image_path)]
+    assert render_calls == [
+        [
+            ("QQ 10001", "uid:1007669673322", "个人绑定"),
+            ("QQ 10002", "PlayerName pc", "个人绑定"),
+        ]
+    ]
+    assert plugin._runtime_user_bindings == {
+        "10001": "uid:1007669673322",
+        "10002": "PlayerName pc",
+    }
+
+
+def test_apexbind_list_text_mode_shows_only_user_bindings(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(
+        main_module,
+        output_mode="text",
+        player_aliases="测试=uid:1234",
+    )
+    plugin._runtime_player_aliases = {"小明": "EaName pc"}
+    plugin._runtime_user_bindings = {"10001": "uid:1007669673322"}
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_get_user_id", lambda event: "10001")
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_save_settings", lambda: None)
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apex绑定 list"
+
+    async def collect():
+        return [item async for item in plugin.apexbind(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert "Apex 查询绑定列表" in result[0][1]
+    assert "QQ 10001=uid:1007669673322" in result[0][1]
+    assert "有效别名" not in result[0][1]
+    assert "测试=uid:1234" not in result[0][1]
+
+
+def test_apexbindinglist_command_shows_binding_list(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="text")
+    plugin._runtime_user_bindings = {"10001": "uid:1007669673322"}
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apex绑定列表"
+
+    async def collect():
+        return [item async for item in plugin.apexbindinglist(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert "Apex 查询绑定列表" in result[0][1]
+    assert "QQ 10001=uid:1007669673322" in result[0][1]
+
+
+def test_apexunbind_command_removes_current_user_binding(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module)
+    plugin._runtime_user_bindings = {
+        "10001": "uid:1007669673322",
+        "10002": "PlayerName pc",
+    }
+    save_calls = []
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_get_user_id", lambda event: "10001")
+    monkeypatch.setattr(plugin, "_save_settings", lambda: save_calls.append(dict(plugin._runtime_user_bindings)))
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apex解绑"
+
+    if not hasattr(plugin, "apexunbind"):
+        pytest.fail("缺少独立的 /apex解绑 取消绑定命令")
+
+    async def collect():
+        return [item async for item in plugin.apexunbind(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert plugin._runtime_user_bindings == {"10002": "PlayerName pc"}
+    assert save_calls == [{"10002": "PlayerName pc"}]
+    assert "已解除你的 Apex 查询绑定" in result[0][1]
+
+
+def test_apexunalias_command_removes_alias_without_removing_binding(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, alias_admin_only=False)
+    plugin._runtime_player_aliases = {"测试": "uid:1234"}
+    plugin._runtime_player_alias_display_names = {"测试": "测试"}
+    plugin._runtime_user_bindings = {"10001": "uid:1007669673322"}
+    save_calls = []
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_save_settings", lambda: save_calls.append(True))
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apex取消别名 测试"
+
+    async def collect():
+        return [item async for item in plugin.apexunalias(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert plugin._runtime_player_aliases == {}
+    assert plugin._runtime_user_bindings == {"10001": "uid:1007669673322"}
+    assert save_calls == [True]
+    assert "已移除动态别名" in result[0][1]
+
+
+def test_apexalias_remove_does_not_remove_user_binding(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, alias_admin_only=False)
+    plugin._runtime_player_aliases = {"测试": "uid:1234"}
+    plugin._runtime_player_alias_display_names = {"测试": "测试"}
+    plugin._runtime_user_bindings = {"10001": "uid:1007669673322"}
+    save_calls = []
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_save_settings", lambda: save_calls.append(True))
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/apexalias remove 测试"
+
+    async def collect():
+        return [item async for item in plugin.apexalias(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert plugin._runtime_player_aliases == {}
+    assert plugin._runtime_user_bindings == {"10001": "uid:1007669673322"}
+    assert save_calls == [True]
+    assert "已移除动态别名" in result[0][1]
+
+
+def test_alias_list_image_renderer_creates_png(tmp_path):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="image", alias_admin_only=True)
+    plugin._data_dir = tmp_path
+
+    path = plugin._render_alias_list_image(
+        [
+            ("测试", "uid:1234", "配置"),
+            ("小明", "EaName pc", "动态"),
+        ]
+    )
+
+    assert path.exists()
+    assert path.suffix == ".png"
+    assert path.parent == tmp_path / "alias_list_cards"
+
+
+def test_predator_image_mode_keeps_four_platform_overview(monkeypatch, tmp_path):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="image")
+    image_path = tmp_path / "predator.png"
+
+    predator_info = main_module.PredatorInfo(
+        platforms={
+            "PC": main_module.PredatorPlatformStats("PC", 20000, 750, "", 1000, 1200),
+            "PS4": main_module.PredatorPlatformStats("PS4", 18000, 750, "", 900, 800),
+        }
+    )
+
+    async def fake_fetch():
+        return predator_info
+
+    render_calls = []
+
+    def fake_render(info, selected_platform=""):
+        render_calls.append(selected_platform)
+        return image_path
+
+    plugin._api = types.SimpleNamespace(fetch_predator_info=fake_fetch)
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event: "")
+    monkeypatch.setattr(plugin, "_render_predator_info_image", fake_render)
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+    monkeypatch.setattr(plugin, "_image", lambda event, path: ("image", path))
+
+    class _Event:
+        message_str = "/apexpredator pc"
+
+    async def collect():
+        return [item async for item in plugin.apexpredator(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result == [("image", image_path)]
+    assert render_calls == [""]
+
+
+def test_predator_image_renderer_requires_template(monkeypatch, tmp_path):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="image")
+    plugin._data_dir = tmp_path
+    monkeypatch.setattr(
+        main_module.Main,
+        "_PREDATOR_TEMPLATE_PATH",
+        tmp_path / "missing_predator_template.png",
+    )
+
+    predator_info = main_module.PredatorInfo(
+        platforms={
+            "PC": main_module.PredatorPlatformStats("PC", 20000, 750, "", 1000, 1200),
+            "PS4": main_module.PredatorPlatformStats("PS4", 18000, 750, "", 900, 800),
+            "X1": main_module.PredatorPlatformStats("X1", 17500, 750, "", 800, 700),
+            "SWITCH": main_module.PredatorPlatformStats("SWITCH", 15000, 750, "", 700, 300),
+        }
+    )
+
+    with pytest.raises(FileNotFoundError):
+        plugin._render_predator_info_image(predator_info, "PC")
 
 
 async def _async_return(value):
