@@ -23,6 +23,8 @@ class PlayerRecord:
     global_rank_percent: str = "未知"
     selected_legend: str = ""
     legend_kills_percent: str = ""
+    display_alias: str = ""
+    alias_target: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -41,6 +43,8 @@ class PlayerRecord:
             global_rank_percent=str(data.get("global_rank_percent", "未知") or "未知"),
             selected_legend=str(data.get("selected_legend", "") or ""),
             legend_kills_percent=str(data.get("legend_kills_percent", "") or ""),
+            display_alias=str(data.get("display_alias", "") or ""),
+            alias_target=str(data.get("alias_target", "") or ""),
         )
 
 
