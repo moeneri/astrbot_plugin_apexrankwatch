@@ -6,6 +6,11 @@ from pathlib import Path
 
 
 IMAGE_LINK_RE = re.compile(r"!\[[^\]]*]\(([^)]+)\)")
+BAD_OVERVIEW_IMAGE_HASHES = {
+    # 左下角 /apexrankwatch 预览错误显示 16000+ 分数但段位仍为钻石 1。
+    "ca6d7d75d40c19a8a4295f928e53b9b8d486af099e2b1794f81d04924cce8206",
+    "fdf9e54f806e895b106a37b42e79d1aaa34f00adae107a006e3e3942a1a0ea46",
+}
 
 
 def test_readme_images_use_absolute_urls_for_astrbot_dashboard():
@@ -34,6 +39,35 @@ def test_readme_images_use_remote_repository_urls_for_astrbot_dashboard():
         for url in image_urls
         if "moeneri/astrbot_plugin_apexrankwatch" not in url
     ] == []
+
+
+def test_readme_overview_image_uses_immutable_cache_safe_url():
+    readme_path = Path(__file__).resolve().parents[1] / "README.md"
+    content = readme_path.read_text(encoding="utf-8")
+
+    image_urls = IMAGE_LINK_RE.findall(content)
+    overview_urls = [
+        url for url in image_urls if "assets/readme/command_effects_overview.png" in url
+    ]
+
+    assert overview_urls
+    assert "@main/" not in overview_urls[0]
+    assert re.search(r"@[0-9a-f]{40}/assets/readme/command_effects_overview\.png", overview_urls[0])
+
+
+def test_readme_overview_image_is_not_known_bad_rankwatch_score_preview():
+    import hashlib
+
+    image_path = (
+        Path(__file__).resolve().parents[1]
+        / "assets"
+        / "readme"
+        / "command_effects_overview.png"
+    )
+
+    image_hash = hashlib.sha256(image_path.read_bytes()).hexdigest()
+
+    assert image_hash not in BAD_OVERVIEW_IMAGE_HASHES
 
 
 def test_metadata_version_is_patch_release():
