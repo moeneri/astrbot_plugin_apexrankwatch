@@ -1,13 +1,71 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 if __package__:
     from .utils import coerce_bool, coerce_int
 else:
     from utils import coerce_bool, coerce_int
+
+
+SCORE_HISTORY_LIMIT = 50
+WATCH_MODE_NOTIFY = "notify"
+WATCH_MODE_RECORD = "record"
+
+
+def normalize_watch_mode(value) -> str:
+    text = str(value or "").strip().lower()
+    if text in {WATCH_MODE_RECORD, "silent", "record_only", "记录", "仅记录"}:
+        return WATCH_MODE_RECORD
+    return WATCH_MODE_NOTIFY
+
+
+@dataclass
+class ScoreChangeRecord:
+    captured_at: int
+    player_name: str
+    platform: str
+    from_score: int
+    to_score: int
+    score_delta: int
+    from_rank_name: str
+    from_rank_div: int
+    to_rank_name: str
+    to_rank_div: int
+    global_rank_percent: str = "未知"
+    selected_legend: str = ""
+    is_season_reset: bool = False
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(data: dict) -> "ScoreChangeRecord":
+        from_score = coerce_int(data.get("from_score", 0), 0)
+        to_score = coerce_int(data.get("to_score", 0), 0)
+        return ScoreChangeRecord(
+            captured_at=coerce_int(data.get("captured_at", 0), 0),
+            player_name=str(data.get("player_name", "") or ""),
+            platform=str(data.get("platform", "PC") or "PC"),
+            from_score=from_score,
+            to_score=to_score,
+            score_delta=coerce_int(data.get("score_delta", to_score - from_score), to_score - from_score),
+            from_rank_name=str(data.get("from_rank_name", "") or ""),
+            from_rank_div=coerce_int(data.get("from_rank_div", 0), 0),
+            to_rank_name=str(data.get("to_rank_name", "") or ""),
+            to_rank_div=coerce_int(data.get("to_rank_div", 0), 0),
+            global_rank_percent=str(data.get("global_rank_percent", "未知") or "未知"),
+            selected_legend=str(data.get("selected_legend", "") or ""),
+            is_season_reset=coerce_bool(data.get("is_season_reset", False), False),
+        )
+
+
+def trim_score_history(history: list[ScoreChangeRecord]) -> list[ScoreChangeRecord]:
+    if len(history) <= SCORE_HISTORY_LIMIT:
+        return history
+    return history[-SCORE_HISTORY_LIMIT:]
 
 
 @dataclass
@@ -25,12 +83,31 @@ class PlayerRecord:
     legend_kills_percent: str = ""
     display_alias: str = ""
     alias_target: str = ""
+    watch_mode: str = WATCH_MODE_NOTIFY
+    history: list[ScoreChangeRecord] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        payload = asdict(self)
+        payload["watch_mode"] = normalize_watch_mode(payload.get("watch_mode"))
+        payload["history"] = [
+            item.to_dict() if isinstance(item, ScoreChangeRecord) else item
+            for item in trim_score_history(list(self.history or []))
+        ]
+        return payload
 
     @staticmethod
     def from_dict(data: dict) -> "PlayerRecord":
+        history: list[ScoreChangeRecord] = []
+        raw_history = data.get("history", [])
+        if isinstance(raw_history, list):
+            for item in raw_history:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    history.append(ScoreChangeRecord.from_dict(item))
+                except Exception:
+                    continue
+
         return PlayerRecord(
             player_name=str(data.get("player_name", "") or ""),
             platform=str(data.get("platform", "PC") or "PC"),
@@ -45,6 +122,8 @@ class PlayerRecord:
             legend_kills_percent=str(data.get("legend_kills_percent", "") or ""),
             display_alias=str(data.get("display_alias", "") or ""),
             alias_target=str(data.get("alias_target", "") or ""),
+            watch_mode=normalize_watch_mode(data.get("watch_mode", WATCH_MODE_NOTIFY)),
+            history=trim_score_history(history),
         )
 
 

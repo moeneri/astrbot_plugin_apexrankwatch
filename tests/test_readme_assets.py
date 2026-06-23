@@ -143,6 +143,19 @@ def test_predator_short_command_is_documented_in_readme_and_metadata():
         assert "/猎杀" in content
 
 
+def test_score_change_feature_is_documented_in_readme_and_metadata():
+    root = Path(__file__).resolve().parents[1]
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    metadata = (root / "metadata.yaml").read_text(encoding="utf-8")
+
+    for content in (readme, metadata):
+        assert "/持续记录 <玩家名|uid:...> [平台]" in content
+        assert "/持续视奸列表" in content
+        assert "/分数变化" in content
+        assert "最多 50 次" in content
+        assert "只记录不通报" in content
+
+
 def test_readme_bottom_documents_data_and_api_sources():
     readme_path = Path(__file__).resolve().parents[1] / "README.md"
     readme = readme_path.read_text(encoding="utf-8")
