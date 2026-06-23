@@ -106,6 +106,55 @@ def _plugin_config(main_module, **overrides):
     return main_module.PluginConfig.from_raw(raw)
 
 
+def _history_record(
+    main_module,
+    *,
+    captured_at: int = 1_780_000_000_000,
+    from_score: int = 18000,
+    to_score: int = 18120,
+    player_name: str = "yumola",
+):
+    return main_module.ScoreChangeRecord(
+        captured_at=captured_at,
+        player_name=player_name,
+        platform="PC",
+        from_score=from_score,
+        to_score=to_score,
+        score_delta=to_score - from_score,
+        from_rank_name="Master",
+        from_rank_div=0,
+        to_rank_name="Master",
+        to_rank_div=0,
+        global_rank_percent="0.7",
+        selected_legend="Wraith",
+        is_season_reset=False,
+    )
+
+
+def _watch_record(
+    main_module,
+    *,
+    score: int = 18000,
+    watch_mode: str = "notify",
+    player_name: str = "yumola",
+    lookup_id: str = "1007669673322",
+    use_uid: bool = True,
+):
+    record = main_module.PlayerRecord(
+        player_name=player_name,
+        platform="PC",
+        lookup_id=lookup_id,
+        use_uid=use_uid,
+        rank_score=score,
+        rank_name="Master",
+        rank_div=0,
+        last_checked=0,
+    )
+    record.watch_mode = watch_mode
+    record.history = []
+    return record
+
+
 def _blank_name_uid_payload():
     return {
         "global": {
@@ -138,6 +187,68 @@ def test_output_mode_defaults_to_image_and_accepts_text():
     assert default_config.output_mode == "image"
     assert text_config.output_mode == "text"
     assert invalid_config.output_mode == "image"
+
+
+def test_player_record_legacy_json_defaults_to_notify_history():
+    main_module = _load_main_module()
+
+    record = main_module.PlayerRecord.from_dict(
+        {
+            "player_name": "LegacyPlayer",
+            "platform": "PC",
+            "lookup_id": "LegacyPlayer",
+            "use_uid": False,
+            "rank_score": 15000,
+            "rank_name": "钻石",
+            "rank_div": 1,
+            "last_checked": 123,
+        }
+    )
+
+    assert record.watch_mode == "notify"
+    assert record.history == []
+
+
+def test_player_record_history_round_trips_valid_rows():
+    main_module = _load_main_module()
+
+    record = main_module.PlayerRecord.from_dict(
+        {
+            "player_name": "yumola",
+            "platform": "PC",
+            "lookup_id": "1007669673322",
+            "use_uid": True,
+            "rank_score": 18120,
+            "rank_name": "Master",
+            "rank_div": 0,
+            "last_checked": 123,
+            "watch_mode": "record",
+            "history": [
+                {
+                    "captured_at": 1_780_000_000_000,
+                    "player_name": "yumola",
+                    "platform": "PC",
+                    "from_score": 18000,
+                    "to_score": 18120,
+                    "score_delta": 120,
+                    "from_rank_name": "Master",
+                    "from_rank_div": 0,
+                    "to_rank_name": "Master",
+                    "to_rank_div": 0,
+                    "global_rank_percent": "0.7",
+                    "selected_legend": "Wraith",
+                    "is_season_reset": False,
+                },
+                "bad-row",
+            ],
+        }
+    )
+
+    assert record.watch_mode == "record"
+    assert len(record.history) == 1
+    assert record.history[0].score_delta == 120
+    payload = record.to_dict()
+    assert payload["history"][0]["to_score"] == 18120
 
 
 def test_player_alias_config_is_parsed_from_panel_string():
@@ -678,6 +789,140 @@ def test_apexrankwatch_stores_alias_display_for_monitor(monkeypatch):
     assert "成功添加对 TestAlias（yumola）" in result[0][1]
 
 
+def test_apexrankrecord_stores_record_mode_without_active_test_message(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(
+        main_module,
+        player_aliases="测试=uid:1007669673322",
+    )
+
+    async def fake_fetch(identifier, platform, use_uid):
+        assert (identifier, platform, use_uid) == ("1007669673322", "", True)
+        return _sample_player(main_module), "PC"
+
+    class _Store:
+        def __init__(self):
+            self.saved_record = None
+
+        def ensure_group(self, group_id, origin):
+            return types.SimpleNamespace(players={})
+
+        def set_player(self, group_id, player_key, record):
+            self.saved_record = record
+
+        def save(self):
+            pass
+
+    active_messages = []
+    plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
+    plugin._runtime_player_aliases = {}
+    plugin._store = _Store()
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event, require_group=False: "")
+    monkeypatch.setattr(plugin, "_get_group_id", lambda event: "group-1")
+    monkeypatch.setattr(plugin, "_is_blacklisted", lambda player: False)
+    monkeypatch.setattr(plugin, "_is_query_blocked", lambda player: False)
+    monkeypatch.setattr(plugin, "_send_active_message", lambda origin, message: active_messages.append((origin, message)) or _async_return(True))
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/持续记录 测试"
+        unified_msg_origin = "origin-1"
+
+    async def collect():
+        return [item async for item in plugin.apexrankrecord(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert plugin._store.saved_record.watch_mode == "record"
+    assert active_messages == []
+    assert "仅记录" in result[0][1]
+
+
+def test_apexrankwatch_stores_notify_mode(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module)
+
+    async def fake_fetch(identifier, platform, use_uid):
+        return _sample_player(main_module), "PC"
+
+    class _Store:
+        def __init__(self):
+            self.saved_record = None
+
+        def ensure_group(self, group_id, origin):
+            return types.SimpleNamespace(players={})
+
+        def set_player(self, group_id, player_key, record):
+            self.saved_record = record
+
+        def save(self):
+            pass
+
+    active_messages = []
+    plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
+    plugin._runtime_player_aliases = {}
+    plugin._store = _Store()
+
+    monkeypatch.setattr(plugin, "_guard_access", lambda event, require_group=False: "")
+    monkeypatch.setattr(plugin, "_get_group_id", lambda event: "group-1")
+    monkeypatch.setattr(plugin, "_is_blacklisted", lambda player: False)
+    monkeypatch.setattr(plugin, "_is_query_blocked", lambda player: False)
+    monkeypatch.setattr(plugin, "_send_active_message", lambda origin, message: active_messages.append((origin, message)) or _async_return(True))
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/持续视奸 yumola"
+        unified_msg_origin = "origin-1"
+
+    async def collect():
+        return [item async for item in plugin.apexrankwatch(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert plugin._store.saved_record.watch_mode == "notify"
+    assert len(active_messages) == 1
+    assert "通报+记录" in result[0][1]
+
+
+def test_cn_rank_watch_list_alt_calls_list(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="text")
+    record = _watch_record(main_module, watch_mode="record")
+
+    class _Store:
+        def get_group(self, group_id):
+            return types.SimpleNamespace(origin="origin-1", players={"uid:1007669673322@PC": record})
+
+        def save(self):
+            pass
+
+    plugin._store = _Store()
+    monkeypatch.setattr(plugin, "_guard_access", lambda event, require_group=False: "")
+    monkeypatch.setattr(plugin, "_get_group_id", lambda event: "group-1")
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/持续视奸列表"
+        unified_msg_origin = "origin-1"
+
+    async def collect():
+        return [item async for item in plugin.apexranklist_cn_alt(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert "仅记录" in result[0][1]
+
+
 @pytest.mark.parametrize(
     ("message", "method_name"),
     [
@@ -878,6 +1123,161 @@ def test_poll_rank_change_image_receives_record_alias(monkeypatch, tmp_path):
 
     assert render_calls == ["TestAlias"]
     assert plugin._store.save_calls == 1
+
+
+def test_poll_record_mode_appends_history_without_notification(monkeypatch, tmp_path):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="image")
+    plugin._poll_concurrency = 1
+    plugin._poll_semaphore = asyncio.Semaphore(1)
+    record = _watch_record(main_module, watch_mode="record", score=18000)
+
+    class _Store:
+        def __init__(self):
+            self.save_calls = 0
+
+        def iter_groups(self):
+            return [
+                (
+                    "group-1",
+                    types.SimpleNamespace(origin="origin-1", players={"uid:1007669673322@PC": record}),
+                )
+            ]
+
+        def save(self):
+            self.save_calls += 1
+
+    async def fake_fetch(identifier, platform, use_uid):
+        player = _sample_player(main_module)
+        player.rank_score = 18120
+        return player, "PC"
+
+    active_images = []
+    active_messages = []
+    plugin._store = _Store()
+    plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
+
+    monkeypatch.setattr(plugin, "_is_blacklisted", lambda player: False)
+    monkeypatch.setattr(plugin, "_is_query_blocked", lambda player: False)
+    monkeypatch.setattr(plugin, "_render_rank_change_image", lambda **kwargs: tmp_path / "rank-change.png")
+    monkeypatch.setattr(plugin, "_send_active_image", lambda origin, path: active_images.append((origin, path)) or _async_return(True))
+    monkeypatch.setattr(plugin, "_send_active_message", lambda origin, message: active_messages.append((origin, message)) or _async_return(True))
+
+    asyncio.run(plugin._poll_once())
+
+    assert len(record.history) == 1
+    assert record.history[0].score_delta == 120
+    assert active_images == []
+    assert active_messages == []
+    assert plugin._store.save_calls == 1
+
+
+def test_poll_notify_mode_appends_history_and_sends_image(monkeypatch, tmp_path):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="image")
+    plugin._poll_concurrency = 1
+    plugin._poll_semaphore = asyncio.Semaphore(1)
+    record = _watch_record(main_module, watch_mode="notify", score=18000)
+
+    class _Store:
+        def __init__(self):
+            self.save_calls = 0
+
+        def iter_groups(self):
+            return [
+                (
+                    "group-1",
+                    types.SimpleNamespace(origin="origin-1", players={"uid:1007669673322@PC": record}),
+                )
+            ]
+
+        def save(self):
+            self.save_calls += 1
+
+    async def fake_fetch(identifier, platform, use_uid):
+        player = _sample_player(main_module)
+        player.rank_score = 18120
+        return player, "PC"
+
+    active_images = []
+    plugin._store = _Store()
+    plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
+
+    monkeypatch.setattr(plugin, "_is_blacklisted", lambda player: False)
+    monkeypatch.setattr(plugin, "_is_query_blocked", lambda player: False)
+    monkeypatch.setattr(plugin, "_render_rank_change_image", lambda **kwargs: tmp_path / "rank-change.png")
+    monkeypatch.setattr(plugin, "_send_active_image", lambda origin, path: active_images.append((origin, path)) or _async_return(True))
+
+    asyncio.run(plugin._poll_once())
+
+    assert len(record.history) == 1
+    assert record.history[0].from_score == 18000
+    assert record.history[0].to_score == 18120
+    assert len(active_images) == 1
+    assert plugin._store.save_calls == 1
+
+
+def test_poll_no_change_does_not_append_history(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="image")
+    plugin._poll_concurrency = 1
+    plugin._poll_semaphore = asyncio.Semaphore(1)
+    record = _watch_record(main_module, watch_mode="notify", score=18888)
+
+    class _Store:
+        def __init__(self):
+            self.save_calls = 0
+
+        def iter_groups(self):
+            return [
+                (
+                    "group-1",
+                    types.SimpleNamespace(origin="origin-1", players={"uid:1007669673322@PC": record}),
+                )
+            ]
+
+        def save(self):
+            self.save_calls += 1
+
+    async def fake_fetch(identifier, platform, use_uid):
+        player = _sample_player(main_module)
+        player.rank_score = 18888
+        return player, "PC"
+
+    plugin._store = _Store()
+    plugin._api = types.SimpleNamespace(fetch_player_stats_auto=fake_fetch)
+
+    monkeypatch.setattr(plugin, "_is_blacklisted", lambda player: False)
+    monkeypatch.setattr(plugin, "_is_query_blocked", lambda player: False)
+
+    asyncio.run(plugin._poll_once())
+
+    assert record.history == []
+    assert plugin._store.save_calls == 0
+
+
+def test_score_history_is_trimmed_to_50():
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    record = _watch_record(main_module, watch_mode="record", score=18000)
+
+    for index in range(55):
+        player = _sample_player(main_module)
+        player.rank_score = 18001 + index
+        plugin._append_score_history(
+            record,
+            player_data=player,
+            old_score=18000 + index,
+            is_season_reset=False,
+            captured_at=1_780_000_000_000 + index,
+        )
+
+    assert len(record.history) == 50
+    assert record.history[0].to_score == 18006
+    assert record.history[-1].to_score == 18055
 
 
 def test_apexalias_add_command_allows_everyone_when_switch_is_off(monkeypatch):
@@ -1341,6 +1741,193 @@ def test_alias_list_image_renderer_creates_png(tmp_path):
     assert path.exists()
     assert path.suffix == ".png"
     assert path.parent == tmp_path / "alias_list_cards"
+
+
+def test_score_change_command_renders_all_group_players_by_default(monkeypatch, tmp_path):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="image")
+    record = _watch_record(main_module, watch_mode="notify")
+    record.history = [_history_record(main_module)]
+    image_path = tmp_path / "score-change.png"
+    render_calls = []
+
+    class _Store:
+        def get_group(self, group_id):
+            return types.SimpleNamespace(origin="origin-1", players={"uid:1007669673322@PC": record})
+
+    plugin._store = _Store()
+    monkeypatch.setattr(plugin, "_guard_access", lambda event, require_group=False: "")
+    monkeypatch.setattr(plugin, "_get_group_id", lambda event: "group-1")
+    monkeypatch.setattr(plugin, "_render_score_change_chart", lambda players, limit: render_calls.append((players, limit)) or image_path)
+    monkeypatch.setattr(plugin, "_image", lambda event, path: ("image", path))
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/分数变化"
+        unified_msg_origin = "origin-1"
+
+    async def collect():
+        return [item async for item in plugin.apex_score_changes(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result == [("image", image_path)]
+    assert render_calls[0][1] == 20
+    assert render_calls[0][0] == [record]
+
+
+def test_score_change_command_filters_player_and_clamps_limit(monkeypatch, tmp_path):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="image")
+    selected = _watch_record(
+        main_module,
+        watch_mode="notify",
+        player_name="yumola",
+        lookup_id="yumola",
+        use_uid=False,
+    )
+    selected.history = [_history_record(main_module, player_name="yumola")]
+    other = _watch_record(
+        main_module,
+        watch_mode="record",
+        player_name="other",
+        lookup_id="other",
+        use_uid=False,
+    )
+    other.history = [_history_record(main_module, player_name="other")]
+    image_path = tmp_path / "score-change.png"
+    render_calls = []
+
+    class _Store:
+        def get_group(self, group_id):
+            return types.SimpleNamespace(
+                origin="origin-1",
+                players={"name:yumola@PC": selected, "name:other@PC": other},
+            )
+
+    plugin._store = _Store()
+    plugin._runtime_player_aliases = {}
+    monkeypatch.setattr(plugin, "_guard_access", lambda event, require_group=False: "")
+    monkeypatch.setattr(plugin, "_get_group_id", lambda event: "group-1")
+    monkeypatch.setattr(plugin, "_render_score_change_chart", lambda players, limit: render_calls.append((players, limit)) or image_path)
+    monkeypatch.setattr(plugin, "_image", lambda event, path: ("image", path))
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/分数变化 yumola 80"
+        unified_msg_origin = "origin-1"
+
+    async def collect():
+        return [item async for item in plugin.apex_score_changes(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result == [("image", image_path)]
+    assert render_calls[0][1] == 50
+    assert render_calls[0][0] == [selected]
+
+
+def test_score_change_text_mode_returns_summary(monkeypatch):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="text")
+    record = _watch_record(main_module, watch_mode="record")
+    record.history = [_history_record(main_module)]
+
+    class _Store:
+        def get_group(self, group_id):
+            return types.SimpleNamespace(origin="origin-1", players={"uid:1007669673322@PC": record})
+
+    plugin._store = _Store()
+    monkeypatch.setattr(plugin, "_guard_access", lambda event, require_group=False: "")
+    monkeypatch.setattr(plugin, "_get_group_id", lambda event: "group-1")
+    monkeypatch.setattr(plugin, "_time_line", lambda: "TIME")
+    monkeypatch.setattr(plugin, "_plain", lambda event, text: ("plain", text))
+
+    class _Event:
+        message_str = "/分数变化"
+        unified_msg_origin = "origin-1"
+
+    async def collect():
+        return [item async for item in plugin.apex_score_changes(_Event())]
+
+    result = asyncio.run(collect())
+
+    assert result[0][0] == "plain"
+    assert "最近 1 次分数变化" in result[0][1]
+    assert "yumola" in result[0][1]
+    assert "仅记录" in result[0][1]
+
+
+def test_score_change_chart_renderer_creates_png(tmp_path):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="image")
+    plugin._data_dir = tmp_path
+    record = _watch_record(main_module, watch_mode="notify")
+    record.history = [
+        _history_record(main_module, captured_at=1_780_000_000_000, from_score=18000, to_score=18120),
+        _history_record(main_module, captured_at=1_780_000_060_000, from_score=18120, to_score=18060),
+    ]
+
+    path = plugin._render_score_change_chart([record], 50)
+
+    assert path.exists()
+    assert path.suffix == ".png"
+    assert path.parent == tmp_path / "score_change_charts"
+    assert path.stat().st_size > 1000
+
+
+def test_score_change_event_panel_does_not_render_mode_column(monkeypatch, tmp_path):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="image")
+    plugin._data_dir = tmp_path
+    record = _watch_record(main_module, watch_mode="record")
+    item = _history_record(main_module)
+    canvas = main_module.Image.new("RGBA", (1800, 420), (8, 18, 30, 255))
+    draw = main_module.ImageDraw.Draw(canvas)
+
+    def fail_mode_label(_player):
+        raise AssertionError("mode label should not be rendered in score-change event rows")
+
+    monkeypatch.setattr(plugin, "_watch_mode_label", fail_mode_label)
+
+    plugin._draw_score_change_event_panel(draw, (44, 44, 1756, 380), [(record, item)])
+
+
+def test_score_change_chart_uses_rank_icon_for_rank_change(monkeypatch, tmp_path):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="image")
+    plugin._data_dir = tmp_path
+    record = _watch_record(main_module, watch_mode="notify", score=12120)
+    item = _history_record(main_module, from_score=11980, to_score=12120)
+    item.from_rank_name = "Platinum"
+    item.from_rank_div = 1
+    item.to_rank_name = "Diamond"
+    item.to_rank_div = 4
+    canvas = main_module.Image.new("RGBA", (1800, 760), (8, 18, 30, 255))
+    draw = main_module.ImageDraw.Draw(canvas)
+    drawn_assets = []
+
+    def record_image_asset(_draw, path, box, clip_octagon=False):
+        drawn_assets.append((path, box, clip_octagon))
+
+    monkeypatch.setattr(plugin, "_draw_image_asset", record_image_asset)
+
+    plugin._draw_score_change_chart_panel(
+        canvas,
+        draw,
+        (44, 44, 1756, 700),
+        [record],
+        [(record, item)],
+    )
+
+    assert drawn_assets
+    assert drawn_assets[0][0].name == "diamond_4.png"
 
 
 def test_predator_image_mode_keeps_four_platform_overview(monkeypatch, tmp_path):

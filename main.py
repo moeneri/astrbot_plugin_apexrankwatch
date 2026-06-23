@@ -39,7 +39,16 @@ if __package__:
         is_score_drop_abnormal,
         normalize_platform,
     )
-    from .storage import GroupStore, PlayerRecord
+    from .storage import (
+        SCORE_HISTORY_LIMIT,
+        WATCH_MODE_NOTIFY,
+        WATCH_MODE_RECORD,
+        GroupStore,
+        PlayerRecord,
+        ScoreChangeRecord,
+        normalize_watch_mode,
+        trim_score_history,
+    )
     from .utils import SHANGHAI_TZ, coerce_bool, coerce_int, now_epoch_ms, now_str
 else:
     from apex_service import (
@@ -60,7 +69,16 @@ else:
         is_score_drop_abnormal,
         normalize_platform,
     )
-    from storage import GroupStore, PlayerRecord
+    from storage import (
+        SCORE_HISTORY_LIMIT,
+        WATCH_MODE_NOTIFY,
+        WATCH_MODE_RECORD,
+        GroupStore,
+        PlayerRecord,
+        ScoreChangeRecord,
+        normalize_watch_mode,
+        trim_score_history,
+    )
     from utils import SHANGHAI_TZ, coerce_bool, coerce_int, now_epoch_ms, now_str
 
 
@@ -187,6 +205,9 @@ class Main(Star):
     _MONITOR_ADDED_CARD_SIZE = (1122, 1040)
     _MONITOR_LIST_CARD_WIDTH = 1122
     _MONITOR_LIST_ROW_LIMIT = 8
+    _SCORE_CHANGE_DEFAULT_LIMIT = 20
+    _SCORE_CHANGE_MAX_LIMIT = SCORE_HISTORY_LIMIT
+    _SCORE_CHANGE_CHART_WIDTH = 1800
     _PREDATOR_IMAGE_CACHE_TTL_SECONDS = 60
     _PREDATOR_GREEN = (88, 210, 126, 255)
     _PREDATOR_DEEP_RED = (158, 31, 36, 255)
@@ -207,6 +228,7 @@ class Main(Star):
         # 英文指令
         "apexrank",
         "apexrankwatch",
+        "apexrankrecord",
         "apexranklist",
         "apexrankremove",
         "apexseason",
@@ -244,7 +266,12 @@ class Main(Star):
         "猎杀",
         "视奸",
         "持续视奸",
+        "持续记录",
+        "持续视奸列表",
         "取消持续视奸",
+        "分数变化",
+        "apex分数变化",
+        "分数图",
         "apex赛季",
         "新赛季",
         "apex测试",
@@ -1215,6 +1242,49 @@ class Main(Star):
             str(getattr(player, "player_name", "") or ""),
         )
 
+    def _append_score_history(
+        self,
+        player: PlayerRecord,
+        *,
+        player_data: ApexPlayerStats,
+        old_score: int,
+        is_season_reset: bool,
+        captured_at: int | None = None,
+    ) -> ScoreChangeRecord:
+        captured_at = now_epoch_ms() if captured_at is None else int(captured_at)
+        to_score = int(player_data.rank_score)
+        item = ScoreChangeRecord(
+            captured_at=captured_at,
+            player_name=player_data.name or player.player_name,
+            platform=player_data.platform or player.platform,
+            from_score=int(old_score),
+            to_score=to_score,
+            score_delta=to_score - int(old_score),
+            from_rank_name=str(getattr(player, "rank_name", "") or ""),
+            from_rank_div=coerce_int(getattr(player, "rank_div", 0), 0),
+            to_rank_name=str(player_data.rank_name or ""),
+            to_rank_div=coerce_int(player_data.rank_div, 0),
+            global_rank_percent=str(player_data.global_rank_percent or "未知"),
+            selected_legend=str(player_data.selected_legend or ""),
+            is_season_reset=bool(is_season_reset),
+        )
+        history = list(getattr(player, "history", []) or [])
+        history.append(item)
+        player.history = trim_score_history(history)
+        return item
+
+    @staticmethod
+    def _watch_mode(player: PlayerRecord) -> str:
+        return normalize_watch_mode(getattr(player, "watch_mode", WATCH_MODE_NOTIFY))
+
+    @staticmethod
+    def _watch_mode_label(mode_or_player) -> str:
+        if isinstance(mode_or_player, PlayerRecord):
+            mode = Main._watch_mode(mode_or_player)
+        else:
+            mode = normalize_watch_mode(mode_or_player)
+        return "仅记录" if mode == WATCH_MODE_RECORD else "通报+记录"
+
     def _is_blacklisted(self, player_name: str) -> bool:
         if not player_name:
             return False
@@ -1337,6 +1407,154 @@ class Main(Star):
             group.players = new_players
         if changed:
             self._store.save()
+
+    def _clamp_score_change_limit(self, value) -> int:
+        try:
+            limit = int(value)
+        except (TypeError, ValueError):
+            limit = self._SCORE_CHANGE_DEFAULT_LIMIT
+        return max(1, min(limit, self._SCORE_CHANGE_MAX_LIMIT))
+
+    def _parse_score_change_args(
+        self, event: AstrMessageEvent, raw_args: str = ""
+    ) -> tuple[str, str, int]:
+        text = self._extract_command_args(event) or str(raw_args or "").strip()
+        if not text:
+            return "", "", self._SCORE_CHANGE_DEFAULT_LIMIT
+
+        parts = [part for part in text.split() if part.strip()]
+        limit = self._SCORE_CHANGE_DEFAULT_LIMIT
+        if parts and parts[-1].isdigit():
+            limit = self._clamp_score_change_limit(parts.pop())
+
+        platform = ""
+        if parts and self._is_platform_token(parts[-1]):
+            platform = parts.pop()
+
+        player_name = " ".join(parts).strip()
+        return player_name, platform, limit
+
+    @staticmethod
+    def _score_history_items(player: PlayerRecord) -> list[ScoreChangeRecord]:
+        items: list[ScoreChangeRecord] = []
+        for item in list(getattr(player, "history", []) or []):
+            if isinstance(item, ScoreChangeRecord):
+                items.append(item)
+            elif isinstance(item, dict):
+                try:
+                    items.append(ScoreChangeRecord.from_dict(item))
+                except Exception:
+                    continue
+        return items
+
+    def _recent_score_change_events(
+        self, players: list[PlayerRecord], limit: int
+    ) -> list[tuple[PlayerRecord, ScoreChangeRecord]]:
+        events: list[tuple[PlayerRecord, ScoreChangeRecord]] = []
+        for player in players:
+            for item in self._score_history_items(player):
+                events.append((player, item))
+        events.sort(key=lambda pair: pair[1].captured_at, reverse=True)
+        return events[: self._clamp_score_change_limit(limit)]
+
+    def _resolve_score_change_players(
+        self,
+        group,
+        player_name: str,
+        platform: str,
+    ) -> tuple[list[PlayerRecord], str]:
+        if not player_name:
+            return list(group.players.values()), ""
+
+        alias_info = self._resolve_player_alias_info(player_name, platform)
+        resolved_name, resolved_platform = alias_info.player_name, alias_info.platform
+        identifier, use_uid = self._parse_identifier(resolved_name)
+        if not identifier:
+            return [], "⚠️ 请提供有效的玩家名称或 UID"
+
+        lookup_name = f"uid:{identifier}" if use_uid else identifier
+        player_key = self._find_player_key(group, lookup_name, resolved_platform, use_uid)
+        display_name = self._display_name_with_alias(
+            alias_info.alias_display if alias_info.matched else "",
+            resolved_name,
+        )
+        if player_key == "__MULTI__":
+            return [], "⚠️ 检测到同名多平台统计，请指定平台，例如: /分数变化 PlayerName pc"
+        if not player_key:
+            return [], f"ℹ️ 本群统计列表里没有找到 {display_name}，请先使用 /持续视奸 或 /持续记录"
+        return [group.players[player_key]], ""
+
+    @staticmethod
+    def _rank_label_from_parts(rank_name: str, rank_div: int) -> str:
+        rank_name = str(rank_name or "未知")
+        rank_div = coerce_int(rank_div, 0)
+        if rank_div:
+            return f"{rank_name} {rank_div}"
+        return rank_name
+
+    def _history_from_rank_label(self, item: ScoreChangeRecord) -> str:
+        return self._rank_label_from_parts(item.from_rank_name, item.from_rank_div)
+
+    def _history_to_rank_label(self, item: ScoreChangeRecord) -> str:
+        return self._rank_label_from_parts(item.to_rank_name, item.to_rank_div)
+
+    def _format_score_history_time(self, captured_at: int) -> str:
+        try:
+            dt = datetime.fromtimestamp(int(captured_at) / 1000, SHANGHAI_TZ)
+        except Exception:
+            return "未知时间"
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    def _score_change_net_delta(self, events: list[ScoreChangeRecord]) -> int:
+        return sum(int(item.score_delta) for item in events)
+
+    def _format_score_change_text(
+        self,
+        players: list[PlayerRecord],
+        limit: int,
+    ) -> str:
+        recent_events = self._recent_score_change_events(players, limit)
+        event_count = len(recent_events)
+        lines = [
+            self._time_line(),
+            f"📈 Apex 分数变化统计（最近 {event_count} 次分数变化）",
+            f"👥 统计玩家: {len(players)} 位",
+        ]
+        if not recent_events:
+            lines.append("ℹ️ 已有统计基线，暂无分数变化记录")
+            return "\n".join(lines)
+
+        for player in players:
+            player_events = [
+                item for owner, item in recent_events if owner is player
+            ]
+            if not player_events:
+                continue
+            latest = player_events[0]
+            delta = self._score_change_net_delta(player_events)
+            lines.extend(
+                [
+                    "➖ —",
+                    f"👤 玩家: {self._record_display_name(player)}",
+                    f"🧾 模式: {self._watch_mode_label(player)}",
+                    f"🏆 当前段位: {self._record_rank_display(player)}",
+                    f"🔢 当前分数: {self._format_rank_score_number(player.rank_score)} RP",
+                    f"📊 最近变化: {delta:+d} RP / {len(player_events)} 次",
+                    f"🕒 最近记录: {self._format_score_history_time(latest.captured_at)}",
+                ]
+            )
+
+        lines.append("➖ —")
+        lines.append("最近明细:")
+        for _, item in recent_events[: min(10, len(recent_events))]:
+            direction = "上分" if item.score_delta > 0 else "掉分"
+            lines.append(
+                f"{direction} {item.from_score} -> {item.to_score} ({item.score_delta:+d}) "
+                f"{self._format_score_history_time(item.captured_at)}"
+            )
+        if len(recent_events) > 10:
+            lines.append(f"还有 {len(recent_events) - 10} 条请查看图片长图")
+        return "\n".join(lines)
 
     @filter.command("apextest")
     async def apextest(self, event: AstrMessageEvent):
@@ -1819,8 +2037,16 @@ class Main(Star):
         )
 
     @filter.command("apexrankwatch")
-    async def apexrankwatch(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
+    async def apexrankwatch(
+        self,
+        event: AstrMessageEvent,
+        player_name: str = "",
+        platform: str = "",
+        watch_mode: str = WATCH_MODE_NOTIFY,
+    ):
         """将玩家加入本群排位分数持续监控。"""
+        watch_mode = normalize_watch_mode(watch_mode)
+        watch_label = self._watch_mode_label(watch_mode)
         deny = self._guard_access(event, require_group=True)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -1911,7 +2137,22 @@ class Main(Star):
         )
 
         if player_key in group.players:
-            yield self._plain(event, f"本群已经在监控 {display_name} 的排名变化了")
+            existing_record = group.players[player_key]
+            old_mode = self._watch_mode(existing_record)
+            if old_mode != watch_mode:
+                existing_record.watch_mode = watch_mode
+                self._store.save()
+                yield self._plain(
+                    event,
+                    "\n".join(
+                        [
+                            self._time_line(),
+                            f"✅ 已将 {display_name} 的统计模式更新为 {watch_label}",
+                        ]
+                    ),
+                )
+                return
+            yield self._plain(event, f"本群已经在监控 {display_name} 的排名变化了（{watch_label}）")
             return
 
         record = PlayerRecord(
@@ -1932,20 +2173,23 @@ class Main(Star):
             last_checked=now_epoch_ms(),
             display_alias=alias_info.alias_display if alias_info.matched else "",
             alias_target=alias_info.alias_target if alias_info.matched else "",
+            watch_mode=watch_mode,
         )
         self._store.set_player(group_id, player_key, record)
         self._store.save()
 
-        await self._send_active_message(
-            event.unified_msg_origin, f"✅ 测试消息: 已添加对 {display_name} 的排名监控"
-        )
+        if watch_mode == WATCH_MODE_NOTIFY:
+            await self._send_active_message(
+                event.unified_msg_origin, f"✅ 测试消息: 已添加对 {display_name} 的排名监控"
+            )
 
         player_data.platform = normalized_platform
         self._apply_alias_to_player_data(player_data, alias_info)
         success_text = "\n".join(
             [
                 self._time_line(),
-                f"✅ 成功添加对 {display_name} 的排名监控",
+                f"✅ 成功添加对 {display_name} 的排名统计",
+                f"🧾 模式: {watch_label}",
                 f"🖥️ 平台: {self._format_platform(normalized_platform)}",
                 f"🏆 当前排名: {self._get_rank_display_text(player_data)}",
             ]
@@ -1954,7 +2198,9 @@ class Main(Star):
             yield self._plain(event, success_text)
             return
         try:
-            image_path = self._render_monitor_added_image(player_data, normalized_platform)
+            image_path = self._render_monitor_added_image(
+                player_data, normalized_platform, watch_mode
+            )
             yield self._image(event, image_path)
         except Exception as exc:
             logger.error(f"监控添加确认图片生成失败，已回退文字输出: {exc}")
@@ -1995,6 +2241,62 @@ class Main(Star):
         except Exception as exc:
             logger.error(f"群监控列表图片生成失败，已回退文字输出: {exc}")
             yield self._plain(event, "\n".join(response_lines))
+
+    @filter.command("分数变化", alias={"apex分数变化", "分数图"})
+    async def apex_score_changes(self, event: AstrMessageEvent, raw_args: str = ""):
+        """生成本群持续视奸和持续记录玩家的分数变化高清长图。"""
+        deny = self._guard_access(event, require_group=True)
+        if deny:
+            yield self._plain(event, "\n".join([self._time_line(), deny]))
+            return
+
+        group_id = self._get_group_id(event)
+        if not group_id:
+            yield self._plain(
+                event,
+                "\n".join([self._time_line(), "⚠️ 此命令仅适用于群聊，请在群聊中使用"]),
+            )
+            return
+
+        group = self._store.get_group(group_id)
+        if group and event.unified_msg_origin and group.origin != event.unified_msg_origin:
+            group.origin = event.unified_msg_origin
+            self._store.save()
+        if not group or not group.players:
+            yield self._plain(
+                event,
+                "\n".join(
+                    [
+                        self._time_line(),
+                        "ℹ️ 本群暂无统计玩家，请先使用 /持续视奸 或 /持续记录 添加玩家",
+                    ]
+                ),
+            )
+            return
+
+        player_name, platform, limit = self._parse_score_change_args(event, raw_args)
+        players, error = self._resolve_score_change_players(group, player_name, platform)
+        if error:
+            yield self._plain(event, "\n".join([self._time_line(), error]))
+            return
+        if not players:
+            yield self._plain(
+                event,
+                "\n".join([self._time_line(), "ℹ️ 当前没有可展示的统计玩家"]),
+            )
+            return
+
+        text = self._format_score_change_text(players, limit)
+        if self._is_text_output_mode():
+            yield self._plain(event, text)
+            return
+
+        try:
+            image_path = self._render_score_change_chart(players, limit)
+            yield self._image(event, image_path)
+        except Exception as exc:
+            logger.error(f"分数变化长图生成失败，已回退文字输出: {exc}")
+            yield self._plain(event, text)
 
     @filter.command("apexrankremove")
     async def apexrankremove(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
@@ -2514,6 +2816,20 @@ class Main(Star):
         async for result in self.apexrankwatch(event, player_name, platform):
             yield result
 
+    @filter.command("apexrankrecord", alias={"持续记录"})
+    async def apexrankrecord(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
+        """将玩家加入本群排位分数持续记录，仅记录变化但不主动通报。"""
+        async for result in self.apexrankwatch(
+            event, player_name, platform, WATCH_MODE_RECORD
+        ):
+            yield result
+
+    @filter.command("持续视奸列表")
+    async def apexranklist_cn_alt(self, event: AstrMessageEvent):
+        """中文别名：查看本群持续视奸和持续记录玩家列表。"""
+        async for result in self.apexranklist(event):
+            yield result
+
     @filter.command("取消持续视奸")
     async def apexrankremove_cn_alt(self, event: AstrMessageEvent, player_name: str = "", platform: str = ""):
         """中文别名：从本群移除指定玩家的排位监控。"""
@@ -2718,6 +3034,14 @@ class Main(Star):
             if is_valid_score and not is_abnormal_drop and new_score != old_score:
                 diff = new_score - old_score
                 diff_text = f"上升 {diff}" if diff > 0 else f"下降 {abs(diff)}"
+                checked_at = now_epoch_ms()
+                self._append_score_history(
+                    player,
+                    player_data=player_data,
+                    old_score=old_score,
+                    is_season_reset=is_season_reset,
+                    captured_at=checked_at,
+                )
 
                 player.rank_score = new_score
                 player.rank_name = player_data.rank_name
@@ -2729,7 +3053,7 @@ class Main(Star):
                     if player_data.legend_kills_rank
                     else ""
                 )
-                player.last_checked = now_epoch_ms()
+                player.last_checked = checked_at
                 dirty = True
 
                 date_str = self._now_str()
@@ -2769,7 +3093,7 @@ class Main(Star):
                 if player_data.is_online and player_data.current_state:
                     message_lines.append(f"🎯 当前状态: {player_data.current_state}")
 
-                if result.group_origin:
+                if result.group_origin and self._watch_mode(player) == WATCH_MODE_NOTIFY:
                     sent_image = False
                     if self._is_image_output_mode():
                         try:
@@ -2789,6 +3113,10 @@ class Main(Star):
                         await self._send_active_message(
                             result.group_origin, "\n".join(message_lines)
                         )
+                elif result.group_origin:
+                    logger.debug(
+                        f"玩家 {display_name} 为仅记录模式，已保存分数变化但不主动通报"
+                    )
                 else:
                     logger.warning(f"群 {result.group_id} 缺少 unified_msg_origin，无法主动推送通知")
             elif not is_valid_score:
@@ -2870,7 +3198,9 @@ class Main(Star):
             "——",
             "【监控（群聊）】",
             "➕ /apexrankwatch <玩家|uid:...> [平台]  别名：/apex监控 /持续视奸",
-            "📋 /apexranklist  别名：/apex列表",
+            "📝 /apexrankrecord <玩家|uid:...> [平台]  别名：/持续记录，只记录不通报",
+            "📋 /apexranklist  别名：/apex列表 /持续视奸列表",
+            "📈 /分数变化 [玩家|uid:...] [平台] [场次]  生成高清长图，最多 50 次",
             "➖ /apexrankremove <玩家|uid:...> [平台]  别名：/apex移除 /取消持续视奸",
             "——",
             "【信息】",
@@ -2892,6 +3222,7 @@ class Main(Star):
             "【参数】",
             "平台：PC / PS4 / X1 / SWITCH（默认 PC；PC 无数据自动尝试其他平台）",
             "UUID：使用 uid: 或 uuid: 前缀（例：/apexrank uid:000000）",
+            "分数变化：默认最近 20 次有效变化，可填写 1-50 次；/持续记录 只记录不通报",
             "——",
             f"⏱️ 监控间隔：{getattr(self._config, 'check_interval', 2)} 分钟",
             f"🔻 最小有效分：{getattr(self._config, 'min_valid_score', 1)} 分",
@@ -2957,10 +3288,11 @@ class Main(Star):
                 (54, 520, 1068, 900),
                 "监控",
                 [
-                    ("➕ /apexrankwatch 玩家 [平台]", "添加群内持续监控"),
-                    ("📋 /apexranklist /apex列表", "查看本群监控列表"),
-                    ("➖ /apexrankremove 玩家 [平台] /取消持续视奸", "移除指定玩家监控"),
-                    ("➕ /apex监控 /持续视奸", "添加监控中文别名"),
+                    ("➕ /apexrankwatch 玩家 [平台]", "持续视奸：记录并主动通报分数变化"),
+                    ("📝 /apexrankrecord 玩家 [平台]", "持续记录：只记录不通报"),
+                    ("📋 /apexranklist /持续视奸列表", "查看通报和记录统计列表"),
+                    ("📈 /分数变化 [玩家] [平台] [场次]", "生成最近变化高清长图，最多 50 次"),
+                    ("➖ /apexrankremove 玩家 [平台]", "移除指定玩家监控或记录"),
                 ],
             ),
             (
@@ -3004,6 +3336,7 @@ class Main(Star):
             ("平台", "PC / PS4 / X1 / SWITCH；PC 无数据会自动尝试其他平台"),
             ("UID", "使用 uid: 或 uuid: 前缀，例如 /apexrank uid:000000"),
             ("查询别名", "全局别名和个人绑定分开管理；绑定可用 /apex查询"),
+            ("分数变化", "默认 20 次，可填写 1-50；持续记录只记录不通报"),
             ("监控间隔", f"{getattr(self._config, 'check_interval', 2)} 分钟"),
             ("最小有效分", f"{getattr(self._config, 'min_valid_score', 1)} 分"),
             ("异常分数", "仅当高分掉到接近 0 分时判定为异常"),
@@ -3374,6 +3707,7 @@ class Main(Star):
             platform = getattr(player, "platform", "PC") or "PC"
             response_lines.append(f"👤 玩家 {index}: {self._record_display_name(player)}")
             response_lines.append(f"🖥️ 平台: {self._format_platform(platform)}")
+            response_lines.append(f"🧾 模式: {self._watch_mode_label(player)}")
             response_lines.append(f"🏆 段位: {rank_display}")
             response_lines.append(f"🔢 分数: {player.rank_score}")
             if player.global_rank_percent and player.global_rank_percent != "未知":
@@ -3518,7 +3852,8 @@ class Main(Star):
         checked_at = self._format_record_checked_at(getattr(player, "last_checked", 0))
         rank_text = self._record_rank_display(player)
         name_text = f"{index}. {name}"
-        meta_text = f"{platform} · {checked_at} · {rank_text}"
+        mode_label = self._watch_mode_label(player)
+        meta_text = f"{platform} · {mode_label} · {checked_at} · {rank_text}"
         name_font = self._fit_font(draw, name_text, 34, 24, 390, bold=True)
         meta_font = self._fit_font(draw, meta_text, 25, 18, 430)
         text_left = box[0] + 132
@@ -3572,25 +3907,443 @@ class Main(Star):
         )
         draw.rectangle((score_left + 28, box[3] - 18, box[2] - 58, box[3] - 12), fill=(221, 48, 52, 185))
 
-    def _render_monitor_added_image(self, player_data: ApexPlayerStats, platform: str) -> Path:
+    def _render_score_change_chart(self, players: list[PlayerRecord], limit: int) -> Path:
+        if Image is None:
+            raise RuntimeError("缺少 Pillow，无法生成分数变化长图")
+
+        output_dir = self._generated_card_output_dir("score_change_charts")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        image = self._build_score_change_chart(players, limit)
+        output_path = output_dir / f"score_change_{now_epoch_ms()}.png"
+        image.save(output_path, format="PNG", optimize=True)
+        self._cleanup_generated_images(output_dir, "score_change_*.png", keep=12)
+        return output_path
+
+    def _build_score_change_chart(self, players: list[PlayerRecord], limit: int):
+        limit = self._clamp_score_change_limit(limit)
+        events_desc = self._recent_score_change_events(players, limit)
+        events = list(reversed(events_desc))
+        width = self._SCORE_CHANGE_CHART_WIDTH
+        margin = 44
+        gap = 22
+        header_h = 226
+        chart_h = 700
+        summary_h = 112 + max(1, len(players)) * 196
+        row_h = 88
+        event_h = 136 + max(1, len(events_desc)) * row_h + 34
+        height = margin * 2 + header_h + gap + chart_h + gap + summary_h + gap + event_h
+
+        canvas = Image.new("RGBA", (width, height), (8, 18, 30, 255))
+        draw = ImageDraw.Draw(canvas)
+        self._draw_score_change_background(canvas)
+
+        header = (margin, margin, width - margin, margin + header_h)
+        chart = (margin, header[3] + gap, width - margin, header[3] + gap + chart_h)
+        summary = (margin, chart[3] + gap, width - margin, chart[3] + gap + summary_h)
+        event_panel = (
+            margin,
+            summary[3] + gap,
+            width - margin,
+            summary[3] + gap + event_h,
+        )
+
+        self._draw_score_change_header(draw, header, players, len(events_desc), limit)
+        self._draw_score_change_chart_panel(canvas, draw, chart, players, events)
+        self._draw_score_change_summary_panel(canvas, draw, summary, players, events_desc)
+        self._draw_score_change_event_panel(draw, event_panel, events_desc)
+        return canvas.convert("RGB")
+
+    def _draw_score_change_background(self, canvas) -> None:
+        width, height = canvas.size
+        draw = ImageDraw.Draw(canvas)
+        for row in range(height):
+            ratio = row / max(1, height - 1)
+            shade = int(8 + 10 * ratio)
+            draw.line((0, row, width, row), fill=(shade, shade + 8, shade + 18, 255))
+        for y in range(96, height, 220):
+            draw.line((0, y, width, y), fill=(23, 48, 72, 90), width=1)
+        draw.rectangle((0, 0, width, 12), fill=(19, 50, 74, 255))
+
+    def _draw_score_panel(self, draw, box: tuple[int, int, int, int]) -> None:
+        draw.rounded_rectangle(
+            box,
+            radius=14,
+            fill=(13, 26, 42, 248),
+            outline=(36, 67, 94, 255),
+            width=2,
+        )
+
+    def _draw_score_change_header(
+        self,
+        draw,
+        box: tuple[int, int, int, int],
+        players: list[PlayerRecord],
+        event_count: int,
+        limit: int,
+    ) -> None:
+        self._draw_score_panel(draw, box)
+        x1, y1, x2, y2 = box
+        title = "APEX分数/段位变化图"
+        title_font = self._font(54, bold=True)
+        meta_font = self._font(24)
+        draw.text((x1 + 28, y1 + 26), title, font=title_font, fill=(237, 245, 255, 255))
+        meta = (
+            f"最近 {event_count} / {limit} 次分数变化   "
+            f"统计玩家 {len(players)} 位   生成时间 {self._now_str()}"
+        )
+        draw.text((x1 + 30, y1 + 92), meta, font=meta_font, fill=(142, 168, 194, 255))
+
+        chip_x = x1 + 30
+        chip_y = y1 + 142
+        chip_font = self._font(23, bold=True)
+        for player in players[:8]:
+            chip_text = f"{self._record_display_name(player)} · {player.rank_score} RP · {self._watch_mode_label(player)}"
+            chip_text = self._fit_text_to_width(draw, chip_text, chip_font, 380)
+            text_box = draw.textbbox((0, 0), chip_text, font=chip_font)
+            chip_w = min(430, text_box[2] - text_box[0] + 34)
+            if chip_x + chip_w > x2 - 30:
+                chip_x = x1 + 30
+                chip_y += 42
+            draw.rounded_rectangle(
+                (chip_x, chip_y, chip_x + chip_w, chip_y + 34),
+                radius=17,
+                fill=(17, 38, 58, 255),
+                outline=(37, 75, 105, 255),
+            )
+            draw.text((chip_x + 17, chip_y + 4), chip_text, font=chip_font, fill=(185, 216, 238, 255))
+            chip_x += chip_w + 12
+
+    def _draw_score_change_chart_panel(
+        self,
+        canvas,
+        draw,
+        box: tuple[int, int, int, int],
+        players: list[PlayerRecord],
+        events: list[tuple[PlayerRecord, ScoreChangeRecord]],
+    ) -> None:
+        self._draw_score_panel(draw, box)
+        x1, y1, x2, y2 = box
+        heading_font = self._font(34, bold=True)
+        small_font = self._font(20)
+        draw.text((x1 + 26, y1 + 22), "变化趋势", font=heading_font, fill=(237, 245, 255, 255))
+        draw.text((x1 + 28, y1 + 66), "横轴按有效分数变化次数排列，绿色为上分，粉色为掉分。", font=small_font, fill=(142, 168, 194, 255))
+
+        plot_x = x1 + 92
+        plot_y = y1 + 126
+        plot_w = x2 - x1 - 132
+        plot_h = y2 - plot_y - 68
+        draw.rounded_rectangle(
+            (plot_x, plot_y, plot_x + plot_w, plot_y + plot_h),
+            radius=12,
+            fill=(16, 33, 53, 255),
+            outline=(28, 49, 71, 255),
+        )
+
+        if not events:
+            empty = "暂无分数变化记录；持续视奸或持续记录产生变化后会显示折线。"
+            empty_font = self._font(28, bold=True)
+            self._draw_centered_stroked_text(
+                draw,
+                empty,
+                empty_font,
+                plot_x,
+                plot_x + plot_w,
+                plot_y,
+                plot_y + plot_h,
+                (185, 201, 220, 255),
+            )
+            return
+
+        grouped: dict[int, list[ScoreChangeRecord]] = {}
+        player_index: dict[int, int] = {}
+        for player, item in events:
+            key = id(player)
+            grouped.setdefault(key, []).append(item)
+            player_index.setdefault(key, players.index(player) if player in players else 0)
+
+        scores: list[int] = []
+        for items in grouped.values():
+            if items:
+                scores.append(items[0].from_score)
+            scores.extend(item.to_score for item in items)
+        y_min = min(scores)
+        y_max = max(scores)
+        if y_min == y_max:
+            y_min = max(0, y_min - 100)
+            y_max += 100
+        else:
+            pad = max(80, int((y_max - y_min) * 0.12))
+            y_min = max(0, y_min - pad)
+            y_max += pad
+        y_span = max(1, y_max - y_min)
+        max_event_count = max((len(items) for items in grouped.values()), default=1)
+
+        def map_x(index: int) -> int:
+            if max_event_count <= 0:
+                return plot_x + plot_w // 2
+            return int(plot_x + (index / max(1, max_event_count)) * plot_w)
+
+        def map_y(score: int) -> int:
+            return int(plot_y + plot_h - ((score - y_min) / y_span) * plot_h)
+
+        grid_font = self._font(18)
+        for tick in range(6):
+            score = int(y_min + y_span * tick / 5)
+            yy = map_y(score)
+            draw.line((plot_x, yy, plot_x + plot_w, yy), fill=(33, 54, 74, 255), width=1)
+            label = str(score)
+            label_box = draw.textbbox((0, 0), label, font=grid_font)
+            draw.text((plot_x - (label_box[2] - label_box[0]) - 14, yy - 10), label, font=grid_font, fill=(118, 144, 168, 255))
+
+        for tick in range(min(6, max_event_count + 1)):
+            index = round(tick * max_event_count / max(1, min(5, max_event_count)))
+            xx = map_x(index)
+            draw.line((xx, plot_y, xx, plot_y + plot_h), fill=(33, 54, 74, 255), width=1)
+            label = "基线" if index == 0 else f"第{index}次"
+            label_box = draw.textbbox((0, 0), label, font=grid_font)
+            draw.text((xx - (label_box[2] - label_box[0]) // 2, plot_y + plot_h + 18), label, font=grid_font, fill=(118, 144, 168, 255))
+
+        palette = [
+            (125, 211, 252, 255),
+            (251, 191, 36, 255),
+            (52, 211, 153, 255),
+            (244, 114, 182, 255),
+            (192, 132, 252, 255),
+            (45, 212, 191, 255),
+        ]
+        for player_key, items in grouped.items():
+            color = palette[player_index.get(player_key, 0) % len(palette)]
+            points: list[tuple[int, int]] = []
+            if items:
+                points.append((map_x(0), map_y(items[0].from_score)))
+            for index, item in enumerate(items, start=1):
+                points.append((map_x(index), map_y(item.to_score)))
+            if len(points) >= 2:
+                draw.line(points, fill=color, width=8, joint="curve")
+                draw.line(points, fill=(145, 219, 255, 110), width=14)
+                draw.line(points, fill=color, width=7, joint="curve")
+            for index, item in enumerate(items, start=1):
+                px, py = points[index]
+                self._draw_score_change_marker(draw, px, py, item)
+
+    def _score_history_rank_changed(self, item: ScoreChangeRecord) -> bool:
+        return self._history_from_rank_label(item) != self._history_to_rank_label(item)
+
+    def _draw_score_change_marker(self, draw, x: int, y: int, item: ScoreChangeRecord) -> None:
+        if self._score_history_rank_changed(item):
+            rank_icon = self._resolve_rank_icon_path(item.to_rank_name, item.to_rank_div)
+            if rank_icon.exists():
+                size = 62
+                box = (x - size // 2, y - size // 2, x + size // 2, y + size // 2)
+                glow_radius = 34
+                draw.ellipse(
+                    (x - glow_radius, y - glow_radius, x + glow_radius, y + glow_radius),
+                    fill=(12, 24, 38, 235),
+                    outline=(134, 239, 172, 210) if item.score_delta >= 0 else (253, 164, 175, 210),
+                    width=4,
+                )
+                self._draw_image_asset(draw, rank_icon, box)
+                return
+
+        positive = item.score_delta > 0
+        fill = (134, 239, 172, 255) if positive else (253, 164, 175, 255)
+        outline = (8, 18, 30, 255)
+        radius = 21
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=fill, outline=outline, width=4)
+        if positive:
+            points = [(x, y - 10), (x - 9, y + 8), (x + 9, y + 8)]
+        else:
+            points = [(x, y + 10), (x - 9, y - 8), (x + 9, y - 8)]
+        draw.polygon(points, fill=(8, 18, 30, 255))
+
+    def _draw_score_change_summary_panel(
+        self,
+        canvas,
+        draw,
+        box: tuple[int, int, int, int],
+        players: list[PlayerRecord],
+        events_desc: list[tuple[PlayerRecord, ScoreChangeRecord]],
+    ) -> None:
+        self._draw_score_panel(draw, box)
+        x1, y1, x2, _ = box
+        heading_font = self._font(34, bold=True)
+        draw.text((x1 + 26, y1 + 22), "数据摘要", font=heading_font, fill=(237, 245, 255, 255))
+        subtitle_font = self._font(20)
+        draw.text((x1 + 28, y1 + 66), "基于持续视奸和持续记录采集到的最近分数变化生成", font=subtitle_font, fill=(142, 168, 194, 255))
+
+        row_y = y1 + 112
+        row_h = 174
+        for player in players:
+            player_events = [item for owner, item in events_desc if owner is player]
+            row = (x1 + 24, row_y, x2 - 24, row_y + row_h)
+            draw.rounded_rectangle(row, radius=12, fill=(16, 33, 53, 255), outline=(28, 55, 78, 255), width=2)
+            rank_icon = self._resolve_rank_icon_path(player.rank_name, player.rank_div)
+            icon_box = (row[0] + 24, row[1] + 28, row[0] + 126, row[1] + 130)
+            if rank_icon.exists():
+                self._draw_image_asset(draw, rank_icon, icon_box)
+            else:
+                self._draw_icon_octagon(draw, icon_box)
+                self._draw_rank_icon(draw, "target", icon_box)
+
+            name_font = self._fit_font(draw, self._record_display_name(player), 32, 22, 360, bold=True)
+            draw.text((row[0] + 148, row[1] + 28), self._record_display_name(player), font=name_font, fill=(237, 245, 255, 255))
+            meta = f"{self._record_rank_display(player)} · {self._format_platform(player.platform)} · {self._watch_mode_label(player)}"
+            meta = self._fit_text_to_width(draw, meta, self._font(22), 470)
+            draw.text((row[0] + 148, row[1] + 74), meta, font=self._font(22), fill=(185, 201, 220, 255))
+            score_text = f"{self._format_rank_score_number(player.rank_score)} RP"
+            draw.text((row[0] + 148, row[1] + 108), score_text, font=self._font(30, bold=True), fill=(237, 245, 255, 255))
+
+            delta = self._score_change_net_delta(player_events)
+            max_score = max([item.to_score for item in player_events] + [player.rank_score])
+            min_score = min([item.to_score for item in player_events] + [player.rank_score])
+            metrics = [
+                ("最近净变化", f"{delta:+d}", (134, 239, 172, 255) if delta > 0 else (253, 164, 175, 255) if delta < 0 else (185, 201, 220, 255)),
+                ("最高/最低", f"{max_score}/{min_score}", (237, 245, 255, 255)),
+                ("变化次数", str(len(player_events)), (237, 245, 255, 255)),
+                ("段位余量", self._rank_progress_text(player.rank_score), (134, 239, 172, 255)),
+            ]
+            metric_x = row[0] + 660
+            metric_w = 240
+            for label, value, color in metrics:
+                label_font = self._font(18)
+                value_font = self._fit_font(draw, value, 28, 18, metric_w - 24, bold=True)
+                draw.text((metric_x, row[1] + 42), label, font=label_font, fill=(142, 168, 194, 255))
+                draw.text((metric_x, row[1] + 76), value, font=value_font, fill=color)
+                metric_x += metric_w
+            row_y += row_h + 22
+
+    def _rank_progress_text(self, score: int) -> str:
+        thresholds = [
+            (0, "新秀 4"),
+            (250, "新秀 3"),
+            (500, "新秀 2"),
+            (750, "新秀 1"),
+            (1000, "青铜 4"),
+            (1500, "青铜 3"),
+            (2000, "青铜 2"),
+            (2500, "青铜 1"),
+            (3250, "白银 4"),
+            (3750, "白银 3"),
+            (4250, "白银 2"),
+            (4750, "白银 1"),
+            (5500, "黄金 4"),
+            (6250, "黄金 3"),
+            (7000, "黄金 2"),
+            (7750, "黄金 1"),
+            (8500, "白金 4"),
+            (9250, "白金 3"),
+            (10000, "白金 2"),
+            (11000, "白金 1"),
+            (12000, "钻石 4"),
+            (13000, "钻石 3"),
+            (14000, "钻石 2"),
+            (15000, "钻石 1"),
+            (16000, "大师"),
+        ]
+        score = coerce_int(score, 0)
+        current = thresholds[0]
+        next_item = None
+        for index, item in enumerate(thresholds):
+            if score >= item[0]:
+                current = item
+                next_item = thresholds[index + 1] if index + 1 < len(thresholds) else None
+        if next_item is None:
+            return f"大师线 +{max(0, score - current[0])}"
+        return f"升 {max(0, next_item[0] - score)} / 掉 {max(0, score - current[0])}"
+
+    def _draw_score_change_event_panel(
+        self,
+        draw,
+        box: tuple[int, int, int, int],
+        events_desc: list[tuple[PlayerRecord, ScoreChangeRecord]],
+    ) -> None:
+        self._draw_score_panel(draw, box)
+        x1, y1, x2, _ = box
+        heading_font = self._font(34, bold=True)
+        draw.text((x1 + 26, y1 + 22), "最近分数变化记录", font=heading_font, fill=(237, 245, 255, 255))
+        draw.text((x1 + 28, y1 + 66), f"最多展示 {self._SCORE_CHANGE_MAX_LIMIT} 次有效分数变化", font=self._font(20), fill=(142, 168, 194, 255))
+
+        inner_x = x1 + 24
+        inner_w = x2 - x1 - 48
+        header_y = y1 + 104
+        row_h = 88
+        columns = [
+            ("状态", 150),
+            ("时间", 310),
+            ("玩家", 360),
+            ("分数变化", 420),
+            ("段位变化", 396),
+        ]
+        draw.rounded_rectangle(
+            (inner_x, header_y, inner_x + inner_w, header_y + 42),
+            radius=12,
+            fill=(17, 38, 58, 255),
+            outline=(37, 75, 105, 255),
+        )
+        cursor_x = inner_x + 14
+        for title, col_w in columns:
+            draw.text((cursor_x, header_y + 10), title, font=self._font(19, bold=True), fill=(185, 201, 220, 255))
+            cursor_x += col_w
+
+        if not events_desc:
+            draw.text((inner_x + 14, header_y + 66), "暂无分数变化记录。", font=self._font(26, bold=True), fill=(185, 201, 220, 255))
+            return
+
+        for index, (player, item) in enumerate(events_desc):
+            row_y = header_y + 54 + index * row_h
+            positive = item.score_delta > 0
+            fill = (13, 42, 36, 255) if positive else (42, 21, 28, 255)
+            outline = (29, 75, 61, 255) if positive else (74, 35, 48, 255)
+            draw.rounded_rectangle(
+                (inner_x, row_y, inner_x + inner_w, row_y + row_h - 10),
+                radius=12,
+                fill=fill,
+                outline=outline,
+            )
+            status = "上分" if positive else "掉分"
+            status_color = (134, 239, 172, 255) if positive else (253, 164, 175, 255)
+            values = [
+                (status, status_color),
+                (self._format_score_history_time(item.captured_at), (185, 201, 220, 255)),
+                (self._record_display_name(player), (237, 245, 255, 255)),
+                (f"{item.from_score} -> {item.to_score} ({item.score_delta:+d})", status_color),
+                (f"{self._history_from_rank_label(item)} -> {self._history_to_rank_label(item)}", (237, 245, 255, 255)),
+            ]
+            cursor_x = inner_x + 14
+            for (text, color), (_, col_w) in zip(values, columns):
+                font = self._fit_font(draw, text, 21, 16, col_w - 18, bold=False)
+                draw.text((cursor_x, row_y + 22), text, font=font, fill=color)
+                cursor_x += col_w
+
+    def _render_monitor_added_image(
+        self,
+        player_data: ApexPlayerStats,
+        platform: str,
+        watch_mode: str = WATCH_MODE_NOTIFY,
+    ) -> Path:
         if Image is None:
             raise RuntimeError("缺少 Pillow，无法生成监控添加确认图片")
 
         output_dir = self._generated_card_output_dir("monitor_added_cards")
         output_dir.mkdir(parents=True, exist_ok=True)
-        image = self._build_monitor_added_card(player_data, platform)
+        image = self._build_monitor_added_card(player_data, platform, watch_mode)
         output_path = output_dir / f"monitor_added_{now_epoch_ms()}.png"
         image.save(output_path, format="PNG", optimize=True)
         self._cleanup_generated_images(output_dir, "monitor_added_*.png", keep=12)
         return output_path
 
-    def _build_monitor_added_card(self, player_data: ApexPlayerStats, platform: str):
+    def _build_monitor_added_card(
+        self,
+        player_data: ApexPlayerStats,
+        platform: str,
+        watch_mode: str = WATCH_MODE_NOTIFY,
+    ):
         width, height = self._MONITOR_ADDED_CARD_SIZE
         canvas = Image.new("RGBA", (width, height), (7, 8, 11, 255))
         draw = ImageDraw.Draw(canvas)
         self._draw_rank_change_background(canvas)
         self._draw_rank_change_outer_frame(draw, width, height)
-        self._draw_monitor_added_header(canvas, draw)
+        self._draw_monitor_added_header(canvas, draw, watch_mode)
         self._draw_monitor_added_status(draw)
 
         rank_display = (
@@ -3614,16 +4367,25 @@ class Main(Star):
             (388, 820, 734, 920),
             player_data.selected_legend or "未知",
         )
-        self._draw_mini_info_pill(draw, (752, 820, 1068, 920), "检测间隔", f"{getattr(self._config, 'check_interval', 2)} 分钟")
+        self._draw_mini_info_pill(draw, (752, 820, 1068, 920), "模式", self._watch_mode_label(watch_mode))
         return canvas.convert("RGB")
 
-    def _draw_monitor_added_header(self, canvas, draw) -> None:
+    def _draw_monitor_added_header(
+        self,
+        canvas,
+        draw,
+        watch_mode: str = WATCH_MODE_NOTIFY,
+    ) -> None:
         box = (54, 54, 1068, 224)
         self._draw_rank_panel_base(draw, box, fill=(12, 14, 19, 238), outline_alpha=150)
         badge = self._apex_logo_badge(118)
         canvas.alpha_composite(badge, (92, 80))
-        title = "Apex 监控已添加"
-        subtitle = "当排位分数变化时会自动推送图片通知"
+        if normalize_watch_mode(watch_mode) == WATCH_MODE_RECORD:
+            title = "Apex 持续记录已添加"
+            subtitle = "将记录排位分数变化，但不会主动推送通知"
+        else:
+            title = "Apex 监控已添加"
+            subtitle = "当排位分数变化时会自动推送图片通知，并写入统计历史"
         title_font = self._fit_font(draw, title, 66, 46, 690, bold=True)
         subtitle_font = self._fit_font(draw, subtitle, 32, 22, 690, bold=True)
         self._draw_text_stroked(
@@ -6254,6 +7016,28 @@ class Main(Star):
                 return font
             current_size -= 2
         return self._font(min_size, bold=bold)
+
+    @staticmethod
+    def _fit_text_to_width(draw, text: str, font, max_width: int) -> str:
+        if not text:
+            return ""
+        box = draw.textbbox((0, 0), text, font=font)
+        if box[2] - box[0] <= max_width:
+            return text
+
+        ellipsis = "..."
+        ellipsis_width = draw.textbbox((0, 0), ellipsis, font=font)[2]
+        if ellipsis_width >= max_width:
+            return ellipsis
+
+        trimmed = text
+        while trimmed:
+            trimmed = trimmed[:-1]
+            candidate = f"{trimmed}{ellipsis}"
+            box = draw.textbbox((0, 0), candidate, font=font)
+            if box[2] - box[0] <= max_width:
+                return candidate
+        return ellipsis
 
     @staticmethod
     def _draw_text_with_shadow(draw, xy, text: str, font, fill) -> None:
