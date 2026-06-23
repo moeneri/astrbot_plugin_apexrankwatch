@@ -17,6 +17,22 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 - 支持全局查询别名和个人默认查询绑定；别名是全局查询映射，绑定是个人默认查询目标。
 - 支持群白名单、用户黑名单、玩家查询黑名单。
 
+## 示例图
+
+### 常用命令效果总览
+
+下图包含 `/新赛季`、`/猎杀`、`/地图`、`/apexrank moeneri` 和 `/apexrankwatch moeneri pc` 的常用输出效果。
+
+![常用命令效果总览](https://cdn.jsdelivr.net/gh/moeneri/astrbot_plugin_apexrankwatch@ca0b02396c6b3f0abc6350087a99a43401656ad5/assets/readme/command_effects_overview.png)
+
+### 分数变化长图示例
+
+下图展示 `/分数变化` 生成的竖直高清长图效果。
+
+备注：统计图需要先使用 `/持续视奸` 或 `/持续记录` 添加玩家，并在后续轮询中采集到有效分数变化后才会生效。
+
+![分数变化长图示例](https://cdn.jsdelivr.net/gh/moeneri/astrbot_plugin_apexrankwatch@main/assets/readme/score_change_chart_example.png)
+
 ## 常用命令
 
 ```text
@@ -37,22 +53,6 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 ```
 
 平台参数支持 `pc`、`ps4`、`x1`、`switch`。不填写平台时，插件会按 PC、PS、Xbox、Switch 的顺序尝试查询。
-
-## 示例图
-
-### 常用命令效果总览
-
-下图包含 `/新赛季`、`/猎杀`、`/地图`、`/apexrank moeneri` 和 `/apexrankwatch moeneri pc` 的常用输出效果。
-
-![常用命令效果总览](https://cdn.jsdelivr.net/gh/moeneri/astrbot_plugin_apexrankwatch@ca0b02396c6b3f0abc6350087a99a43401656ad5/assets/readme/command_effects_overview.png)
-
-### 分数变化长图示例
-
-下图展示 `/分数变化` 生成的竖直高清长图效果。
-
-备注：统计图需要先使用 `/持续视奸` 或 `/持续记录` 添加玩家，并在后续轮询中采集到有效分数变化后才会生效。
-
-![分数变化长图示例](https://cdn.jsdelivr.net/gh/moeneri/astrbot_plugin_apexrankwatch@main/assets/readme/score_change_chart_example.png)
 
 ## 命令列表
 
