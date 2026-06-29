@@ -522,6 +522,26 @@ class ApexApiClient:
                     rotation_mode.current,
                     rotation_mode.next,
                 )
+                if (
+                    rotation_mode.current is not None
+                    and rotation_mode.next is not None
+                    and "仅显示 API 当前/下一张" in source_note
+                ):
+                    try:
+                        html = await self._request_text_with_retry(source_url)
+                        raw_entries = parse_map_schedule_page(html)
+                        fallback_entries, fallback_note = build_daily_map_entries_from_api(
+                            raw_entries,
+                            now,
+                            current=rotation_mode.current,
+                            next_entry=rotation_mode.next,
+                        )
+                    except Exception as exc:
+                        self._logger.debug(f"全天地图网页排期兜底失败: {exc}")
+                    else:
+                        if len(fallback_entries) > len(daily_entries):
+                            daily_entries = fallback_entries
+                            source_note = f"{fallback_note}；学习状态：{source_note}"
             else:
                 html = await self._request_text_with_retry(source_url)
                 raw_entries = parse_map_schedule_page(html)

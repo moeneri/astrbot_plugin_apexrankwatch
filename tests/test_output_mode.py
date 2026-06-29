@@ -1995,5 +1995,82 @@ def test_predator_image_renderer_requires_template(monkeypatch, tmp_path):
         plugin._render_predator_info_image(predator_info, "PC")
 
 
+def test_ranked_daily_map_schedule_uses_web_fallback_when_pool_learning_blocks_prediction():
+    main_module = _load_main_module()
+    current = main_module.MapRotationEntry(
+        map_name="Olympus",
+        map_name_zh="奥林匹斯",
+        start_timestamp=1778268600,
+        end_timestamp=1778284800,
+        readable_start="",
+        readable_end="",
+        duration_secs=16200,
+        duration_minutes=270,
+        asset="",
+        code="",
+    )
+    next_entry = main_module.MapRotationEntry(
+        map_name="Broken Moon",
+        map_name_zh="残月",
+        start_timestamp=1778284800,
+        end_timestamp=1778301000,
+        readable_start="",
+        readable_end="",
+        duration_secs=16200,
+        duration_minutes=270,
+        asset="",
+        code="",
+    )
+    html = """
+    <div><h3>Olympus</h3><p>From <span data-tz="1778268600">21:30</span> to <span data-tz="1778284800">02:00</span></p></div>
+    <div><h3>Broken Moon</h3><p>From <span data-tz="1778284800">02:00</span> to <span data-tz="1778301000">06:30</span></p></div>
+    <div><h3>Kings Canyon</h3><p>From <span data-tz="1778301000">06:30</span> to <span data-tz="1778317200">11:00</span></p></div>
+    <div><h3>Olympus</h3><p>From <span data-tz="1778317200">11:00</span> to <span data-tz="1778333400">15:30</span></p></div>
+    """
+    client = object.__new__(main_module.ApexApiClient)
+    client._daily_map_lock = asyncio.Lock()
+    client._daily_map_cache = {}
+    client._daily_map_cache_ttl_seconds = 600
+    client._logger = types.SimpleNamespace(debug=lambda *_args, **_kwargs: None)
+    rotation_info = main_module.MapRotationInfo()
+    rotation_info.ranked.current = current
+    rotation_info.ranked.next = next_entry
+
+    async def fetch_map_rotation_info():
+        return rotation_info
+
+    async def request_text(_url):
+        return html
+
+    client.fetch_map_rotation_info = fetch_map_rotation_info
+    client._request_text_with_retry = request_text
+    state = main_module.DailyMapPoolState(
+        season_key="S29:Season 29",
+        status="confirmed",
+        cycle=["Storm Point", "World's Edge", "E-District"],
+        reason="API 已确认排位地图池闭环",
+    )
+
+    schedule = asyncio.run(
+        main_module.ApexApiClient.fetch_daily_map_schedule(
+            client,
+            "ranked",
+            pool_state=state,
+            season_info=None,
+        )
+    )
+
+    assert schedule.pool_state is not None
+    assert schedule.pool_state.status == "learning"
+    assert "网页地图池推断" in schedule.source_note
+    assert len(schedule.entries) > 2
+    assert [entry.map_name for entry in schedule.entries[:4]] == [
+        "Olympus",
+        "Broken Moon",
+        "Kings Canyon",
+        "Olympus",
+    ]
+
+
 async def _async_return(value):
     return value
