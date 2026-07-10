@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from html import unescape
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -24,11 +24,14 @@ _TRANSLATIONS_FILE = Path(__file__).with_name("translations.json")
 APEX_API_PORTAL_URL = "https://portal.apexlegendsapi.com/"
 APEX_API_VERIFY_URL = "https://portal.apexlegendsapi.com/discord-auth"
 APEX_SEASONS_HOME_URL = "https://apexseasons.online/"
+APEX_SEASONS_ALLOWED_HOSTS = frozenset(
+    {"apexseasons.online", "www.apexseasons.online"}
+)
+APEX_SEASONS_MAX_REDIRECTS = 4
+APEX_SEASONS_CURRENT_CANDIDATE_LIMIT = 4
 ESPORTSTALES_SEASONS_URL = "https://www.esportstales.com/apex-legends/season-end-date"
-APEX_STATUS_SEASON_COUNTDOWN_URL = "https://apexlegendsstatus.com/new-season-countdown"
 APEX_STATUS_RANKED_MAP_URL = "https://apexlegendsstatus.com/current-map/battle_royale/ranked"
 APEX_STATUS_PUBS_MAP_URL = "https://apexlegendsstatus.com/current-map/battle_royale/pubs"
-APEX_STATUS_SEASON_DURATION_DAYS = 91
 MAX_DAILY_MAP_CALIBRATION_OFFSET_SECS = 12 * 60 * 60
 SEASON_MAP_POOL_LOCK_BEFORE_END_SECS = 2 * 60 * 60
 SEASON_MAP_POOL_LOCK_AFTER_END_SECS = 12 * 60 * 60
@@ -74,11 +77,6 @@ SPLIT_LINE_RE = re.compile(
 )
 MONTH_DAY_RE = re.compile(r"([A-Za-z]{3,9})\s+(\d{1,2})(?:,\s*(\d{4}))?")
 FUZZY_DATE_TOKEN_RE = re.compile(r"/|around|approx|estimate|estimated", re.IGNORECASE)
-APEX_STATUS_START_TIME_RE = re.compile(r"\bstartTime\s*=\s*(\d{9,12})\b", re.IGNORECASE)
-APEX_STATUS_SEASON_TITLE_RE = re.compile(
-    r"Countdown\s+to\s+Season\s+(\d+)(?:\s*:\s*([^\"<\n\r]+))?",
-    re.IGNORECASE,
-)
 MAP_SCHEDULE_ENTRY_RE = re.compile(
     r"<h3[^>]*>(?P<map>.*?)</h3>.*?"
     r"From\s*<span\s+data-tz=[\"'](?P<start>\d+)[\"'][^>]*>.*?</span>"
@@ -612,56 +610,125 @@ class ApexApiClient:
             if cached is not None:
                 return cached
 
-            home_html = await self._request_text_with_retry(APEX_SEASONS_HOME_URL)
-            references = _extract_season_references(home_html)
-            if not references:
-                raise RuntimeError("无法从赛季首页提取赛季列表")
-
-            if season_number is None:
-                target = references[0]
-            else:
-                target = next(
-                    (
-                        item
-                        for item in references
-                        if item.season_number == season_number
-                    ),
-                    None,
-                )
-                if target is None:
-                    raise RuntimeError(f"未找到 S{season_number} 的赛季数据")
-
-            detail_html = ""
-            if target.season_url:
-                detail_html = await self._request_text_with_retry(target.season_url)
-
-            season_info = _build_season_info(
-                reference=target,
-                home_html=home_html,
-                detail_html=detail_html,
+            season_info = await self._fetch_season_from_apexseasons(
+                season_number,
+                use_public_split_index=True,
             )
-
-            split_index = await self._get_split_index()
-            _apply_ranked_split_details(season_info, split_index)
-
             self._season_cache[cache_key] = (time.monotonic(), season_info)
             return season_info
 
-    async def fetch_current_season_info(self) -> SeasonInfo:
+    async def fetch_current_season_info(
+        self,
+        now: datetime | None = None,
+    ) -> SeasonInfo:
         cache_key = "season:current"
-        cached = self._get_cached_season(cache_key)
+        effective_now = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
+        cached = self._get_cached_season(cache_key, now=effective_now)
         if cached is not None:
             return cached
 
         async with self._season_lock:
-            cached = self._get_cached_season(cache_key)
+            cached = self._get_cached_season(cache_key, now=effective_now)
             if cached is not None:
                 return cached
 
-            html = await self._request_text_with_retry(APEX_STATUS_SEASON_COUNTDOWN_URL)
-            season_info = _parse_apex_status_current_season_info(html)
+            season_info = await self._fetch_season_from_apexseasons(
+                None,
+                use_public_split_index=False,
+                now=effective_now,
+            )
             self._season_cache[cache_key] = (time.monotonic(), season_info)
             return season_info
+
+    async def _fetch_season_from_apexseasons(
+        self,
+        season_number: int | None,
+        *,
+        use_public_split_index: bool,
+        now: datetime | None = None,
+    ) -> SeasonInfo:
+        home_url = _require_allowed_https_url(
+            APEX_SEASONS_HOME_URL,
+            APEX_SEASONS_ALLOWED_HOSTS,
+        )
+        home_html = await self._request_text_with_retry(
+            home_url,
+            allowed_hosts=APEX_SEASONS_ALLOWED_HOSTS,
+        )
+        references = _extract_season_references(home_html)
+        if not references:
+            raise RuntimeError("无法从赛季首页提取赛季列表")
+        effective_now = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
+
+        async def fetch_reference(reference: _SeasonReference) -> SeasonInfo:
+            detail_html = ""
+            if reference.season_url:
+                detail_url = _require_allowed_https_url(
+                    reference.season_url,
+                    APEX_SEASONS_ALLOWED_HOSTS,
+                )
+                detail_html = await self._request_text_with_retry(
+                    detail_url,
+                    allowed_hosts=APEX_SEASONS_ALLOWED_HOSTS,
+                )
+            return _build_season_info(
+                reference=reference,
+                home_html=home_html,
+                detail_html=detail_html,
+            )
+
+        if season_number is None:
+            season_info = None
+            current_references = sorted(
+                references,
+                key=lambda reference: (
+                    reference.season_number is None,
+                    -(reference.season_number or 0),
+                    reference.position or 9999,
+                    reference.season_url,
+                ),
+            )
+            for reference in current_references[:APEX_SEASONS_CURRENT_CANDIDATE_LIMIT]:
+                try:
+                    candidate = await fetch_reference(reference)
+                except httpx.HTTPStatusError as exc:
+                    status = (
+                        exc.response.status_code
+                        if exc.response is not None
+                        else 0
+                    )
+                    if status in (404, 410):
+                        continue
+                    raise
+                try:
+                    start, end = _require_complete_season_range(candidate)
+                except RuntimeError:
+                    continue
+                if start > effective_now:
+                    continue
+                if end <= effective_now:
+                    break
+                season_info = candidate
+                break
+            if season_info is None:
+                raise RuntimeError("未找到包含当前时间且具有可信完整起止时间的赛季数据")
+        else:
+            target = next(
+                (
+                    item
+                    for item in references
+                    if item.season_number == season_number
+                ),
+                None,
+            )
+            if target is None:
+                raise RuntimeError(f"未找到 S{season_number} 的赛季数据")
+            season_info = await fetch_reference(target)
+            _require_complete_season_range(season_info)
+
+        split_index = await self._get_split_index() if use_public_split_index else {}
+        _apply_ranked_split_details(season_info, split_index, now=effective_now)
+        return season_info
 
     async def _fetch_player(
         self, identifier: str, platform: str, use_uid: bool
@@ -896,8 +963,20 @@ class ApexApiClient:
             return text[: cls._MAX_DEBUG_PAYLOAD_CHARS] + "...(truncated)"
         return text
 
-    async def _request_text_with_retry(self, url: str) -> str:
+    async def _request_text_with_retry(
+        self,
+        url: str,
+        *,
+        allowed_hosts: frozenset[str] | None = None,
+    ) -> str:
         last_error: Exception | None = None
+        normalized_allowed_hosts = (
+            frozenset(str(host).lower() for host in allowed_hosts)
+            if allowed_hosts is not None
+            else None
+        )
+        if normalized_allowed_hosts is not None:
+            url = _require_allowed_https_url(url, normalized_allowed_hosts)
 
         for attempt in range(self._max_retries + 1):
             if attempt > 0:
@@ -908,8 +987,40 @@ class ApexApiClient:
                 await asyncio.sleep(delay)
 
             try:
-                self._debug_log_request("TEXT", url, params=None, headers=None)
-                response = await self._client.get(url)
+                current_url = url
+                redirects_followed = 0
+                while True:
+                    self._debug_log_request("TEXT", current_url, params=None, headers=None)
+                    if normalized_allowed_hosts is None:
+                        response = await self._client.get(current_url)
+                    else:
+                        response = await self._client.get(
+                            current_url,
+                            follow_redirects=False,
+                        )
+                    if (
+                        normalized_allowed_hosts is not None
+                        and response.status_code in (301, 302, 303, 307, 308)
+                    ):
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise httpx.HTTPStatusError(
+                                "Redirect response missing Location header",
+                                request=response.request,
+                                response=response,
+                            )
+                        if redirects_followed >= APEX_SEASONS_MAX_REDIRECTS:
+                            raise httpx.TooManyRedirects(
+                                "Too many redirects for season page request",
+                                request=response.request,
+                            )
+                        current_url = _require_allowed_https_url(
+                            urljoin(current_url, location),
+                            normalized_allowed_hosts,
+                        )
+                        redirects_followed += 1
+                        continue
+                    break
                 if response.status_code == 429 or response.status_code >= 500:
                     raise httpx.HTTPStatusError(
                         "Retryable HTTP status",
@@ -917,7 +1028,12 @@ class ApexApiClient:
                         response=response,
                     )
                 response.raise_for_status()
-                self._debug_log_response("TEXT", url, response.text, response.status_code)
+                self._debug_log_response(
+                    "TEXT",
+                    current_url,
+                    response.text,
+                    response.status_code,
+                )
                 return response.text
             except httpx.HTTPStatusError as exc:
                 last_error = exc
@@ -938,7 +1054,11 @@ class ApexApiClient:
             raise last_error
         raise RuntimeError("页面请求失败")
 
-    def _get_cached_season(self, cache_key: str) -> SeasonInfo | None:
+    def _get_cached_season(
+        self,
+        cache_key: str,
+        now: datetime | None = None,
+    ) -> SeasonInfo | None:
         cached = self._season_cache.get(cache_key)
         if not cached:
             return None
@@ -946,6 +1066,13 @@ class ApexApiClient:
         if time.monotonic() - saved_at > self._season_cache_ttl_seconds:
             self._season_cache.pop(cache_key, None)
             return None
+        now_dt = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
+        season_info.status_text = _resolve_season_status(
+            season_info.start_iso,
+            season_info.end_iso,
+            now=now_dt,
+        )
+        _update_current_split_state(season_info, now=now_dt)
         return season_info
 
     async def _get_split_index(self) -> dict[int, list[_SplitTextRange]]:
@@ -2190,71 +2317,32 @@ def _parse_season_name(text: str) -> tuple[int | None, str]:
     return number, name
 
 
-def _parse_apex_status_current_season_info(
-    html: str, now: datetime | None = None
-) -> SeasonInfo:
-    target_timestamp = _extract_apex_status_start_timestamp(html)
-    if target_timestamp is None:
-        raise RuntimeError("无法从 Apex Legends Status 页面提取赛季时间戳")
-
-    target_number, target_name = _extract_apex_status_season_title(html)
-    target_dt = datetime.fromtimestamp(target_timestamp, tz=timezone.utc)
-    now_dt = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
-
-    if target_number is not None and now_dt < target_dt:
-        # 倒计时还没结束时，时间戳就是当前赛季结束、下一赛季开始的时刻。
-        season_number = max(1, target_number - 1)
-        season_name = ""
-        start_dt = target_dt - timedelta(days=APEX_STATUS_SEASON_DURATION_DAYS)
-        end_dt = target_dt
-    else:
-        # 倒计时已到达时，页面标题对应当前赛季；按常规 13 周赛季长度推算结束。
-        season_number = target_number
-        season_name = target_name
-        start_dt = target_dt
-        end_dt = target_dt + timedelta(days=APEX_STATUS_SEASON_DURATION_DAYS)
-
-    start_iso = _to_iso_datetime(start_dt)
-    end_iso = _to_iso_datetime(end_dt)
-    return SeasonInfo(
-        season_number=season_number,
-        season_name=season_name,
-        start_date=_format_iso_date(start_iso),
-        end_date=_format_iso_date(end_iso),
-        timezone="Asia/Shanghai",
-        update_time_hint="Apex Legends Status countdown 时间戳",
-        source="apexlegendsstatus.com",
-        season_url=APEX_STATUS_SEASON_COUNTDOWN_URL,
-        start_iso=start_iso,
-        end_iso=end_iso,
-        status_text=_resolve_season_status(start_iso, end_iso),
-        supports_ranked_splits=False,
-    )
-
-
-def _extract_apex_status_start_timestamp(html: str) -> int | None:
-    match = APEX_STATUS_START_TIME_RE.search(html or "")
-    if not match:
-        return None
-    return _to_int(match.group(1))
-
-
-def _extract_apex_status_season_title(html: str) -> tuple[int | None, str]:
-    matches = list(APEX_STATUS_SEASON_TITLE_RE.finditer(unescape(html or "")))
-    if not matches:
-        return None, ""
-    match = next((item for item in matches if item.group(2)), matches[0])
-    number = _to_int(match.group(1))
-    name = re.sub(r"\s+", " ", match.group(2) or "").strip(" -:|")
-    return number, name
-
-
 def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _require_allowed_https_url(
+    url: str,
+    allowed_hosts: frozenset[str],
+) -> str:
+    normalized_url = str(url or "").strip()
+    try:
+        parsed = urlsplit(normalized_url)
+        hostname = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError("赛季数据 URL 格式无效") from exc
+    if parsed.scheme.lower() != "https" or hostname not in allowed_hosts:
+        raise RuntimeError("赛季数据 URL 必须使用允许的 HTTPS 域名")
+    if parsed.username is not None or parsed.password is not None:
+        raise RuntimeError("赛季数据 URL 不允许包含凭据")
+    if port not in (None, 443):
+        raise RuntimeError("赛季数据 URL 必须使用标准 HTTPS 端口")
+    return normalized_url
 
 
 def _build_season_info(
@@ -2294,13 +2382,37 @@ def _build_season_info(
     return season_info
 
 
+def _require_complete_season_range(
+    season_info: SeasonInfo,
+) -> tuple[datetime, datetime]:
+    def parse_explicit_datetime(value: str) -> datetime | None:
+        if not value:
+            return None
+        try:
+            normalized = value.replace("Z", "+00:00") if value.endswith("Z") else value
+            parsed = datetime.fromisoformat(normalized)
+        except Exception:
+            return None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed.astimezone(timezone.utc)
+
+    start = parse_explicit_datetime(season_info.start_iso)
+    end = parse_explicit_datetime(season_info.end_iso)
+    if start is None or end is None or end <= start:
+        raise RuntimeError("赛季数据缺少可信的完整起止时间")
+    return start, end
+
+
 def _apply_ranked_split_details(
     season_info: SeasonInfo,
     split_index: dict[int, list[_SplitTextRange]],
+    now: datetime | None = None,
 ) -> None:
     season_info.status_text = _resolve_season_status(
         season_info.start_iso,
         season_info.end_iso,
+        now=now,
     )
     if not _season_uses_ranked_splits(season_info.season_number):
         season_info.supports_ranked_splits = False
@@ -2334,9 +2446,7 @@ def _apply_ranked_split_details(
             season_info.split_source = "未知"
             season_info.split_note = "无法推导上下半赛季的分界时间。"
             return
-        boundary_note = (
-            "未找到公开 split 精确时间，已按赛季中点附近的北京时间周三凌晨 1 点推导。"
-        )
+        boundary_note = "下半赛季分界按完整赛季中点后首个北京时间周三 01:00 推测，可能不完全准确。"
         split_source = "推导"
         exact = False
 
@@ -2369,7 +2479,7 @@ def _apply_ranked_split_details(
             note=boundary_note,
         ),
     ]
-    _update_current_split_state(season_info)
+    _update_current_split_state(season_info, now=now)
 
 
 def _extract_event_dates_from_jsonld(html: str) -> tuple[str | None, str | None]:
@@ -2600,8 +2710,27 @@ def _resolve_partial_date(
 def _infer_split_boundary(season_start: datetime, season_end: datetime) -> datetime | None:
     if season_end <= season_start:
         return None
-    midpoint = season_start + ((season_end - season_start) / 2)
-    return _nearest_beijing_update_boundary(midpoint, season_start, season_end)
+
+    midpoint_local = (
+        season_start + ((season_end - season_start) / 2)
+    ).astimezone(SHANGHAI_TZ)
+    days_until_wednesday = (2 - midpoint_local.weekday()) % 7
+    candidate_date = midpoint_local.date() + timedelta(days=days_until_wednesday)
+    candidate_local = datetime(
+        candidate_date.year,
+        candidate_date.month,
+        candidate_date.day,
+        1,
+        0,
+        tzinfo=SHANGHAI_TZ,
+    )
+    if candidate_local < midpoint_local:
+        candidate_local += timedelta(days=7)
+
+    candidate_utc = candidate_local.astimezone(timezone.utc)
+    if not season_start < candidate_utc < season_end:
+        return None
+    return candidate_utc
 
 
 def _infer_split_boundary_from_source_date(
@@ -2672,20 +2801,27 @@ def _season_uses_ranked_splits(season_number: int | None) -> bool:
     return True
 
 
-def _resolve_season_status(start_iso: str, end_iso: str) -> str:
-    now = datetime.now(timezone.utc)
+def _resolve_season_status(
+    start_iso: str,
+    end_iso: str,
+    now: datetime | None = None,
+) -> str:
+    now_dt = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
     start = _parse_iso_datetime(start_iso)
     end = _parse_iso_datetime(end_iso)
-    if start is not None and now < start:
+    if start is not None and now_dt < start:
         return "未开始"
-    if end is not None and now >= end:
+    if end is not None and now_dt >= end:
         return "已结束"
     if start is not None or end is not None:
         return "进行中"
     return "未知"
 
 
-def _update_current_split_state(season_info: SeasonInfo) -> None:
+def _update_current_split_state(
+    season_info: SeasonInfo,
+    now: datetime | None = None,
+) -> None:
     if not season_info.splits:
         if not season_info.supports_ranked_splits:
             season_info.current_split_label = ""
@@ -2694,7 +2830,7 @@ def _update_current_split_state(season_info: SeasonInfo) -> None:
         season_info.next_transition_iso = ""
         return
 
-    now = datetime.now(timezone.utc)
+    now_dt = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
     split_one, split_two = season_info.splits
     split_one_start = _parse_iso_datetime(split_one.start_iso)
     split_one_end = _parse_iso_datetime(split_one.end_iso)
@@ -2702,19 +2838,19 @@ def _update_current_split_state(season_info: SeasonInfo) -> None:
     if not split_one_start or not split_one_end or not split_two_end:
         return
 
-    if now < split_one_start:
+    if now_dt < split_one_start:
         season_info.current_split_label = "未开始"
         season_info.current_split_index = None
         season_info.next_transition_label = "上半赛季开始"
         season_info.next_transition_iso = split_one.start_iso
         return
-    if now < split_one_end:
+    if now_dt < split_one_end:
         season_info.current_split_label = split_one.stage_name
         season_info.current_split_index = split_one.index
         season_info.next_transition_label = "下半赛季开始"
         season_info.next_transition_iso = split_one.end_iso
         return
-    if now < split_two_end:
+    if now_dt < split_two_end:
         season_info.current_split_label = split_two.stage_name
         season_info.current_split_index = split_two.index
         season_info.next_transition_label = "赛季结束"

@@ -74,7 +74,7 @@ def test_metadata_version_is_patch_release():
     metadata_path = Path(__file__).resolve().parents[1] / "metadata.yaml"
     metadata = metadata_path.read_text(encoding="utf-8")
 
-    assert "version: 2.4.1" in metadata
+    assert "version: 2.4.2" in metadata
 
 
 def test_readme_intro_mentions_codex_assistance():

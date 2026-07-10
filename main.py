@@ -197,8 +197,10 @@ class Main(Star):
     _MAP_CARD_SIZE = (900, 320)
     _MAP_CURRENT_HEIGHT = 212
     _MAP_IMAGE_CACHE_TTL_SECONDS = 60
-    _SEASON_CARD_SIZE = (900, 320)
+    _SEASON_CARD_SIZE = (840, 360)
+    _SEASON_CARD_RENDERER_VERSION = 3
     _SEASON_IMAGE_CACHE_TTL_SECONDS = 60
+    _SEASON_IMAGE_CACHE_MAX_ENTRIES = 16
     _RANK_CHANGE_CARD_SIZE = (1122, 1402)
     _PLAYER_RANK_CARD_SIZE = (1122, 1402)
     _HELP_CARD_SIZE = (1122, 2380)
@@ -5611,12 +5613,17 @@ class Main(Star):
 
         output_dir = self._season_card_output_dir()
         output_dir.mkdir(parents=True, exist_ok=True)
-        cache_key = self._season_info_image_cache_key(output_dir, season_info)
+        rendered_at = datetime.now(timezone.utc)
+        cache_key = self._season_info_image_cache_key(
+            output_dir,
+            season_info,
+            now=rendered_at,
+        )
         cached_path = self._get_cached_season_info_image(cache_key)
         if cached_path is not None:
             return cached_path
 
-        image = self._build_season_info_card(season_info)
+        image = self._build_season_info_card(season_info, now=rendered_at)
         output_path = output_dir / f"season_info_{now_epoch_ms()}.png"
         image.save(output_path, format="PNG", optimize=True)
         self._set_cached_season_info_image(cache_key, output_path)
@@ -5645,17 +5652,67 @@ class Main(Star):
         if not isinstance(cache, dict):
             cache = {}
             self._season_info_image_cache = cache
-        cache[cache_key] = (time.monotonic(), Path(image_path))
+        saved_at = time.monotonic()
+        for existing_key, (existing_saved_at, existing_path) in list(cache.items()):
+            if (
+                saved_at - existing_saved_at > self._SEASON_IMAGE_CACHE_TTL_SECONDS
+                or not Path(existing_path).exists()
+            ):
+                cache.pop(existing_key, None)
+
+        cache[cache_key] = (saved_at, Path(image_path))
+        excess = len(cache) - self._SEASON_IMAGE_CACHE_MAX_ENTRIES
+        if excess <= 0:
+            return
+        oldest_keys = sorted(
+            (item for item in cache.items() if item[0] != cache_key),
+            key=lambda item: item[1][0],
+        )
+        for existing_key, _cached in oldest_keys[:excess]:
+            cache.pop(existing_key, None)
 
     def _season_info_image_cache_key(
-        self, output_dir: Path, season_info: SeasonInfo
+        self,
+        output_dir: Path,
+        season_info: SeasonInfo,
+        *,
+        now: datetime | None = None,
     ) -> tuple:
+        effective_now = now or datetime.now(timezone.utc)
+        if effective_now.tzinfo is None:
+            effective_now = effective_now.replace(tzinfo=timezone.utc)
+        else:
+            effective_now = effective_now.astimezone(timezone.utc)
+        minute_bucket = effective_now.replace(second=0, microsecond=0).isoformat()
+        split_fingerprints = tuple(
+            (
+                getattr(split_info, "start_iso", ""),
+                getattr(split_info, "end_iso", ""),
+                getattr(split_info, "source", ""),
+                getattr(split_info, "exact", None),
+                getattr(split_info, "note", ""),
+            )
+            for split_info in (getattr(season_info, "splits", None) or [])
+        )
         return (
             str(output_dir.resolve()),
+            self._SEASON_CARD_RENDERER_VERSION,
+            minute_bucket,
             season_info.season_number,
             season_info.season_name,
             season_info.start_iso,
             season_info.end_iso,
+            getattr(season_info, "start_date", ""),
+            getattr(season_info, "end_date", ""),
+            getattr(season_info, "status_text", ""),
+            getattr(season_info, "source", ""),
+            getattr(season_info, "split_source", ""),
+            getattr(season_info, "split_note", ""),
+            getattr(season_info, "current_split_label", ""),
+            getattr(season_info, "current_split_index", None),
+            getattr(season_info, "next_transition_label", ""),
+            getattr(season_info, "next_transition_iso", ""),
+            split_fingerprints,
         )
 
     def _season_card_output_dir(self) -> Path:
@@ -5676,10 +5733,13 @@ class Main(Star):
         except Exception as exc:
             logger.debug(f"清理赛季缓存图片失败: {exc}")
 
-    def _build_season_info_card(self, season_info: SeasonInfo):
+    def _build_season_info_card(
+        self, season_info: SeasonInfo, now: datetime | None = None
+    ):
         width, height = self._SEASON_CARD_SIZE
         canvas = Image.new("RGBA", (width, height), (10, 11, 14, 255))
         draw = ImageDraw.Draw(canvas)
+        effective_now = now or datetime.now(timezone.utc)
 
         # 使用 Apex 红黑配色，保证 QQ 缩略图里也能快速读到赛季和结束时间。
         for row in range(height):
@@ -5700,55 +5760,61 @@ class Main(Star):
 
         season_label = self._season_card_label(season_info)
         end_time = self._to_beijing_time(season_info.end_iso) or season_info.end_date or "未知"
-        start_time = self._to_beijing_time(season_info.start_iso) or season_info.start_date or "未知"
-        remaining = self._format_remaining(season_info.end_iso) or "未知"
-        progress = self._season_progress_fraction(season_info)
+        start_weekday_time = (
+            self._to_beijing_time_with_weekday(season_info.start_iso)
+            or season_info.start_date
+            or "未知"
+        )
+        end_weekday_time = (
+            self._to_beijing_time_with_weekday(season_info.end_iso)
+            or season_info.end_date
+            or "未知"
+        )
+        progress = self._season_progress_fraction(season_info, now=effective_now)
+        split_fraction = self._season_split_fraction(season_info)
+        split_remaining = self._format_split_remaining(
+            season_info, now=effective_now
+        )
 
-        logo = self._apex_logo_badge(92)
-        canvas.alpha_composite(logo, (34, 28))
+        logo = self._apex_logo_badge(84)
+        canvas.alpha_composite(logo, (28, 24))
 
-        header_font = self._font(24, bold=True)
-        title_font = self._fit_font(draw, season_label, 62, 38, width - 330, bold=True)
-        label_font = self._font(25, bold=True)
-        value_font = self._fit_font(draw, end_time, 46, 30, width - 405, bold=True)
-        small_font = self._fit_font(draw, f"剩余 {remaining}", 22, 16, 250, bold=False)
-        source_font = self._font(18)
+        header_font = self._font(20, bold=True)
+        brand_font = self._font(16, bold=True)
+        title_max_width = 540
+        title_font = self._fit_font(
+            draw, season_label, 38, 28, title_max_width, bold=True
+        )
+        display_season_label = self._fit_text_to_width(
+            draw, season_label, title_font, title_max_width
+        )
+        label_font = self._fit_font(draw, self._season_end_label(), 23, 18, 172, bold=True)
+        value_font = self._fit_font(draw, end_time, 38, 28, 520, bold=True)
         source_text = self._season_source_label(season_info.source)
-        source_font = self._fit_font(draw, source_text, 18, 14, 250, bold=False)
+        source_font = self._fit_font(draw, source_text, 15, 12, 300, bold=False)
 
-        draw.text((146, 31), "APEX LEGENDS", font=source_font, fill=(216, 35, 42, 255))
+        draw.text((132, 29), "APEX LEGENDS", font=brand_font, fill=apex_red)
         self._draw_text_with_shadow(
             draw,
-            (146, 54),
+            (132, 52),
             "当前赛季",
             header_font,
             fill=(236, 239, 244, 255),
         )
         self._draw_text_with_shadow(
             draw,
-            (146, 88),
-            season_label,
+            (132, 79),
+            display_season_label,
             title_font,
             fill=(255, 255, 255, 255),
         )
 
-        status = season_info.status_text or "未知"
-        status_font = self._fit_font(draw, status, 24, 18, 120, bold=True)
-        draw.rounded_rectangle((728, 34, 850, 72), radius=8, fill=(232, 43, 45, 245))
-        status_box = draw.textbbox((0, 0), status, font=status_font)
-        draw.text(
-            (789 - (status_box[2] - status_box[0]) / 2, 43),
-            status,
-            font=status_font,
-            fill=(255, 255, 255, 255),
-        )
-
-        panel = (34, 164, 866, 250)
-        label_bounds = (64, 164, 292, 250)
-        time_bounds = (304, 164, 846, 250)
+        panel = (30, 148, 810, 218)
+        label_bounds = (54, 148, 238, 218)
+        time_bounds = (248, 148, 790, 218)
         draw.rounded_rectangle(panel, radius=8, fill=(15, 18, 24, 238))
         draw.rounded_rectangle(panel, radius=8, outline=(232, 43, 45, 160), width=2)
-        draw.rounded_rectangle((34, 164, 48, 250), radius=7, fill=apex_red)
+        draw.rounded_rectangle((30, 148, 44, 218), radius=7, fill=apex_red)
         end_label = self._season_end_label()
         self._draw_text_with_shadow(
             draw,
@@ -5778,7 +5844,18 @@ class Main(Star):
             fill=(255, 246, 228, 255),
         )
 
-        bar_x, bar_y, bar_w, bar_h = 58, 270, 520, 14
+        source_box = draw.textbbox((0, 0), source_text, font=source_font)
+        source_width = source_box[2] - source_box[0]
+        source_x = 810 - source_width - source_box[0]
+        self._draw_text_with_shadow(
+            draw,
+            (source_x, 122),
+            source_text,
+            source_font,
+            fill=(178, 190, 204, 230),
+        )
+
+        bar_x, bar_y, bar_w, bar_h = 48, 252, 744, 14
         draw.rounded_rectangle(
             (bar_x, bar_y, bar_x + bar_w, bar_y + bar_h),
             radius=7,
@@ -5791,24 +5868,153 @@ class Main(Star):
             apex_red,
             apex_amber,
         )
-        draw.text(
-            (58, 288),
-            f"开始 {start_time}",
-            font=source_font,
+
+        split_x = None
+        if split_fraction is not None:
+            split_x = bar_x + round(bar_w * split_fraction)
+            divider_top, divider_bottom = 240, 281
+            divider_glow = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+            glow_draw = ImageDraw.Draw(divider_glow)
+            glow_draw.rounded_rectangle(
+                (
+                    split_x - 7,
+                    divider_top - 3,
+                    split_x + 7,
+                    divider_bottom + 3,
+                ),
+                radius=7,
+                fill=(69, 230, 139, 48),
+            )
+            canvas.alpha_composite(divider_glow)
+            draw.rounded_rectangle(
+                (split_x - 3, divider_top, split_x + 3, divider_bottom),
+                radius=3,
+                fill=(83, 225, 133, 255),
+            )
+
+            if split_remaining:
+                countdown_font = self._fit_font(
+                    draw, split_remaining, 13, 11, 180, bold=True
+                )
+                countdown_box = draw.textbbox((0, 0), split_remaining, font=countdown_font)
+                countdown_width = countdown_box[2] - countdown_box[0] + 22
+                pill_left = min(
+                    max(split_x - countdown_width / 2, 24),
+                    width - 24 - countdown_width,
+                )
+                pill = (
+                    pill_left,
+                    220,
+                    pill_left + countdown_width,
+                    240,
+                )
+                draw.rounded_rectangle(
+                    pill,
+                    radius=10,
+                    fill=(22, 74, 50, 246),
+                    outline=(83, 225, 133, 220),
+                    width=1,
+                )
+                countdown_x = self._centered_text_x(
+                    draw, split_remaining, countdown_font, pill[0], pill[2]
+                )
+                countdown_y = self._centered_text_y(
+                    draw, split_remaining, countdown_font, pill[1], pill[3]
+                )
+                self._draw_text_with_shadow(
+                    draw,
+                    (countdown_x, countdown_y),
+                    split_remaining,
+                    countdown_font,
+                    fill=(176, 255, 204, 255),
+                )
+
+        timeline_label_font = self._font(17, bold=True)
+        start_time_font = self._fit_font(
+            draw, start_weekday_time, 16, 15, 170, bold=False
+        )
+        end_time_font = self._fit_font(
+            draw, end_weekday_time, 16, 15, 170, bold=False
+        )
+        self._draw_text_with_shadow(
+            draw,
+            (48, 275),
+            "赛季开始",
+            timeline_label_font,
+            fill=(220, 224, 232, 245),
+        )
+        self._draw_text_with_shadow(
+            draw,
+            (48, 299),
+            start_weekday_time,
+            start_time_font,
             fill=(191, 198, 209, 235),
         )
-        draw.text(
-            (620, 267),
-            f"剩余 {remaining}",
-            font=small_font,
-            fill=(255, 235, 204, 255),
+
+        end_label_text = "赛季结束"
+        end_label_width = draw.textbbox(
+            (0, 0), end_label_text, font=timeline_label_font
+        )[2]
+        end_time_width = draw.textbbox(
+            (0, 0), end_weekday_time, font=end_time_font
+        )[2]
+        self._draw_text_with_shadow(
+            draw,
+            (792 - end_label_width, 275),
+            end_label_text,
+            timeline_label_font,
+            fill=(220, 224, 232, 245),
         )
-        draw.text(
-            (620, 296),
-            source_text,
-            font=source_font,
-            fill=(178, 190, 204, 230),
+        self._draw_text_with_shadow(
+            draw,
+            (792 - end_time_width, 299),
+            end_weekday_time,
+            end_time_font,
+            fill=(191, 198, 209, 235),
         )
+
+        if split_x is not None:
+            split_time = self._to_beijing_time_with_weekday(
+                getattr(season_info.splits[0], "end_iso", "")
+            )
+            if split_time:
+                split_time_font = self._fit_font(
+                    draw, split_time, 16, 15, 190, bold=False
+                )
+                split_time_box = draw.textbbox(
+                    (0, 0), split_time, font=split_time_font
+                )
+                split_time_width = split_time_box[2] - split_time_box[0]
+                split_time_left = min(
+                    max(split_x - split_time_width / 2, 220),
+                    620 - split_time_width,
+                )
+                split_time_x = split_time_left - split_time_box[0]
+                self._draw_text_with_shadow(
+                    draw,
+                    (split_time_x, 299),
+                    split_time,
+                    split_time_font,
+                    fill=(176, 235, 197, 245),
+                )
+
+        disclaimer_lines, disclaimer_font = self._season_card_disclaimer_lines(
+            draw,
+            season_info,
+            max_width=width - 80,
+        )
+        disclaimer_y_positions = (329,) if len(disclaimer_lines) == 1 else (320, 339)
+        for disclaimer, disclaimer_y in zip(disclaimer_lines, disclaimer_y_positions):
+            disclaimer_x = self._centered_text_x(
+                draw, disclaimer, disclaimer_font, 24, width - 24
+            )
+            self._draw_text_with_shadow(
+                draw,
+                (disclaimer_x, disclaimer_y),
+                disclaimer,
+                disclaimer_font,
+                fill=(170, 176, 186, 235),
+            )
 
         return canvas.convert("RGB")
 
@@ -5824,6 +6030,27 @@ class Main(Star):
         parsed = urlsplit(text if "://" in text else f"https://{text}")
         host = parsed.netloc or parsed.path.split("/")[0]
         return f"来源 {host or text}"
+
+    def _season_card_disclaimer_lines(
+        self,
+        draw,
+        season_info: SeasonInfo,
+        *,
+        max_width: int,
+    ) -> tuple[tuple[str, ...], object | None]:
+        split_source = str(getattr(season_info, "split_source", "") or "").strip()
+        if split_source == "推导":
+            text = (
+                "下半赛季分界按赛季中点后首个北京时间周三 01:00 推测，"
+                "可能不完全准确，仅供参考。"
+            )
+        else:
+            text = str(getattr(season_info, "split_note", "") or "").strip()
+        if not text:
+            return (), None
+        font = self._fit_font(draw, text, 15, 8, max_width, bold=False)
+        fitted_text = self._fit_text_to_width(draw, text, font, max_width)
+        return (fitted_text,), font
 
     @staticmethod
     def _centered_text_x(draw, text: str, font, left: int, right: int) -> float:
@@ -5903,29 +6130,91 @@ class Main(Star):
         return season_info.season_name or "未知赛季"
 
     @staticmethod
-    def _season_progress_fraction(season_info: SeasonInfo) -> float:
+    def _parse_card_datetime(value: str) -> datetime | None:
         try:
-            start = season_info.start_iso
-            end = season_info.end_iso
-            if not start or not end:
-                return 0.0
-            start_dt = datetime.fromisoformat(
-                start.replace("Z", "+00:00") if start.endswith("Z") else start
-            )
-            end_dt = datetime.fromisoformat(
-                end.replace("Z", "+00:00") if end.endswith("Z") else end
-            )
-            if start_dt.tzinfo is None:
-                start_dt = start_dt.replace(tzinfo=timezone.utc)
-            if end_dt.tzinfo is None:
-                end_dt = end_dt.replace(tzinfo=timezone.utc)
-            total = (end_dt - start_dt).total_seconds()
-            if total <= 0:
-                return 0.0
-            elapsed = (datetime.now(timezone.utc) - start_dt.astimezone(timezone.utc)).total_seconds()
-            return min(1.0, max(0.0, elapsed / total))
+            normalized = str(value or "").strip()
+            if not normalized:
+                return None
+            if normalized.endswith("Z"):
+                normalized = f"{normalized[:-1]}+00:00"
+            parsed = datetime.fromisoformat(normalized)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
         except Exception:
+            return None
+
+    @staticmethod
+    def _season_split_boundary(season_info: SeasonInfo) -> datetime | None:
+        splits = getattr(season_info, "splits", None)
+        if not splits or len(splits) < 2:
+            return None
+        return Main._parse_card_datetime(getattr(splits[0], "end_iso", ""))
+
+    @staticmethod
+    def _season_progress_fraction(
+        season_info: SeasonInfo, now: datetime | None = None
+    ) -> float:
+        start_dt = Main._parse_card_datetime(getattr(season_info, "start_iso", ""))
+        end_dt = Main._parse_card_datetime(getattr(season_info, "end_iso", ""))
+        if start_dt is None or end_dt is None:
             return 0.0
+        total = (end_dt - start_dt).total_seconds()
+        if total <= 0:
+            return 0.0
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        else:
+            current = current.astimezone(timezone.utc)
+        elapsed = (current - start_dt).total_seconds()
+        return min(1.0, max(0.0, elapsed / total))
+
+    @staticmethod
+    def _season_split_fraction(season_info: SeasonInfo) -> float | None:
+        start_dt = Main._parse_card_datetime(getattr(season_info, "start_iso", ""))
+        end_dt = Main._parse_card_datetime(getattr(season_info, "end_iso", ""))
+        boundary = Main._season_split_boundary(season_info)
+        if start_dt is None or end_dt is None or boundary is None:
+            return None
+        total = (end_dt - start_dt).total_seconds()
+        if total <= 0:
+            return None
+        fraction = (boundary - start_dt).total_seconds() / total
+        return fraction if 0.0 < fraction < 1.0 else None
+
+    @staticmethod
+    def _format_split_remaining(
+        season_info: SeasonInfo, now: datetime | None = None
+    ) -> str:
+        start_dt = Main._parse_card_datetime(getattr(season_info, "start_iso", ""))
+        end_dt = Main._parse_card_datetime(getattr(season_info, "end_iso", ""))
+        boundary = Main._season_split_boundary(season_info)
+        if start_dt is None or end_dt is None or boundary is None:
+            return ""
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        else:
+            current = current.astimezone(timezone.utc)
+        if not start_dt <= current < boundary < end_dt:
+            return ""
+        total_seconds = int((boundary - current).total_seconds())
+        days = total_seconds // 86400
+        hours = (total_seconds % 86400) // 3600
+        if days or hours:
+            return f"距下半赛季 {days}天 {hours}小时"
+        minutes = max(1, total_seconds // 60)
+        return f"距下半赛季 {minutes}分钟"
+
+    @staticmethod
+    def _to_beijing_time_with_weekday(iso_value: str) -> str:
+        parsed = Main._parse_card_datetime(iso_value)
+        if parsed is None:
+            return ""
+        beijing = parsed.astimezone(SHANGHAI_TZ)
+        weekday = "一二三四五六日"[beijing.weekday()]
+        return f"{beijing:%Y-%m-%d} 周{weekday} {beijing:%H:%M}"
 
     def _format_map_rotation_text(
         self, rotation_info: MapRotationInfo, mode: str = "ranked"
@@ -7380,6 +7669,9 @@ class Main(Star):
             lines.append(f"📈 赛季进度: {progress}")
 
         if season_info.supports_ranked_splits and season_info.splits:
+            has_inexact_split = any(
+                not getattr(split, "exact", True) for split in season_info.splits
+            )
             if season_info.current_split_label:
                 lines.append(f"🧩 当前阶段: {season_info.current_split_label}")
             if season_info.next_transition_label and season_info.next_transition_iso:
@@ -7397,13 +7689,16 @@ class Main(Star):
                 lines.append(
                     f"{split.index}️⃣ {split.stage_name}: {split_start} ~ {split_end}"
                 )
-            if any(not split.exact for split in season_info.splits):
-                lines.append(
-                    "⚠️ Split 时间说明: 以下上下半赛季时间已转换为北京时间；若来源未提供精确时刻，则按北京时间周三凌晨 1 点推导。"
-                )
+            if has_inexact_split:
+                if season_info.split_source == "推导":
+                    lines.append(
+                        "⚠️ 下半赛季分界按完整赛季中点后首个北京时间周三 01:00 推测，可能不完全准确，仅供参考。"
+                    )
+                elif season_info.split_note:
+                    lines.append(f"⚠️ Split 时间说明: {season_info.split_note}")
             if season_info.split_source:
                 split_meta = season_info.split_source
-                if season_info.split_note:
+                if season_info.split_note and not has_inexact_split:
                     split_meta = f"{split_meta}（{season_info.split_note}）"
                 lines.append(f"🧠 Split 数据: {split_meta}")
         elif season_info.split_note:
