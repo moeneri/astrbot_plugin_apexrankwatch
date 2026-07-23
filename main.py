@@ -198,7 +198,7 @@ class Main(Star):
     _MAP_CURRENT_HEIGHT = 212
     _MAP_IMAGE_CACHE_TTL_SECONDS = 60
     _SEASON_CARD_SIZE = (840, 360)
-    _SEASON_CARD_RENDERER_VERSION = 3
+    _SEASON_CARD_RENDERER_VERSION = 4
     _SEASON_IMAGE_CACHE_TTL_SECONDS = 60
     _SEASON_IMAGE_CACHE_MAX_ENTRIES = 16
     _RANK_CHANGE_CARD_SIZE = (1122, 1402)
@@ -5775,6 +5775,9 @@ class Main(Star):
         split_remaining = self._format_split_remaining(
             season_info, now=effective_now
         )
+        season_end_remaining = self._format_season_end_remaining(
+            season_info, now=effective_now
+        )
 
         logo = self._apex_logo_badge(84)
         canvas.alpha_composite(logo, (28, 24))
@@ -5788,6 +5791,9 @@ class Main(Star):
         display_season_label = self._fit_text_to_width(
             draw, season_label, title_font, title_max_width
         )
+        panel = (30, 148, 810, 218)
+        label_bounds = (54, 148, 238, 218)
+        time_bounds = (248, 148, 790, 218)
         label_font = self._fit_font(draw, self._season_end_label(), 23, 18, 172, bold=True)
         value_font = self._fit_font(draw, end_time, 38, 28, 520, bold=True)
         source_text = self._season_source_label(season_info.source)
@@ -5808,10 +5814,53 @@ class Main(Star):
             title_font,
             fill=(255, 255, 255, 255),
         )
+        if season_end_remaining:
+            # 倒计时放在右上角，避免与结束日期主面板争夺视觉层级。
+            remaining_font = self._fit_font(
+                draw,
+                season_end_remaining,
+                18,
+                12,
+                220,
+                bold=True,
+            )
+            remaining_text_box = draw.textbbox(
+                (0, 0), season_end_remaining, font=remaining_font
+            )
+            remaining_text_width = remaining_text_box[2] - remaining_text_box[0]
+            pill_width = min(244, remaining_text_width + 24)
+            pill_right = 810
+            pill_left = max(560, pill_right - pill_width)
+            remaining_pill = (pill_left, 32, pill_right, 72)
+            draw.rounded_rectangle(
+                remaining_pill,
+                radius=10,
+                fill=(15, 18, 24, 220),
+                outline=(240, 174, 72, 220),
+                width=1,
+            )
+            remaining_x = self._centered_text_x(
+                draw,
+                season_end_remaining,
+                remaining_font,
+                remaining_pill[0],
+                remaining_pill[2],
+            )
+            remaining_y = self._centered_text_y(
+                draw,
+                season_end_remaining,
+                remaining_font,
+                remaining_pill[1],
+                remaining_pill[3],
+            )
+            self._draw_text_with_shadow(
+                draw,
+                (remaining_x, remaining_y),
+                season_end_remaining,
+                remaining_font,
+                fill=apex_amber,
+            )
 
-        panel = (30, 148, 810, 218)
-        label_bounds = (54, 148, 238, 218)
-        time_bounds = (248, 148, 790, 218)
         draw.rounded_rectangle(panel, radius=8, fill=(15, 18, 24, 238))
         draw.rounded_rectangle(panel, radius=8, outline=(232, 43, 45, 160), width=2)
         draw.rounded_rectangle((30, 148, 44, 218), radius=7, fill=apex_red)
@@ -6048,6 +6097,10 @@ class Main(Star):
             text = str(getattr(season_info, "split_note", "") or "").strip()
         if not text:
             return (), None
+        if split_source == "推导":
+            # 推导说明是产品固定文案：允许继续缩小字号，但不能截断或追加省略号。
+            font = self._fit_font(draw, text, 15, 1, max_width, bold=False)
+            return (text,), font
         font = self._fit_font(draw, text, 15, 8, max_width, bold=False)
         fitted_text = self._fit_text_to_width(draw, text, font, max_width)
         return (fitted_text,), font
@@ -6206,6 +6259,41 @@ class Main(Star):
             return f"距下半赛季 {days}天 {hours}小时"
         minutes = max(1, total_seconds // 60)
         return f"距下半赛季 {minutes}分钟"
+
+    @staticmethod
+    def _format_season_end_remaining(
+        season_info: SeasonInfo, now: datetime | None = None
+    ) -> str:
+        """Format the image-only full-season countdown without changing text output."""
+        try:
+            start_dt = Main._parse_card_datetime(
+                getattr(season_info, "start_iso", "")
+            )
+            end_dt = Main._parse_card_datetime(
+                getattr(season_info, "end_iso", "")
+            )
+            if start_dt is None or end_dt is None or end_dt <= start_dt:
+                return ""
+
+            current = now or datetime.now(timezone.utc)
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=timezone.utc)
+            else:
+                current = current.astimezone(timezone.utc)
+
+            if current < start_dt:
+                return ""
+            if current >= end_dt:
+                return "赛季已结束"
+
+            total_seconds = int((end_dt - current).total_seconds())
+            if total_seconds < 3600:
+                return "距赛季结束 不足1小时"
+            days = total_seconds // 86400
+            hours = (total_seconds % 86400) // 3600
+            return f"距赛季结束 {days}天 {hours}小时"
+        except Exception:
+            return ""
 
     @staticmethod
     def _to_beijing_time_with_weekday(iso_value: str) -> str:

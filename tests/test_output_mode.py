@@ -2138,6 +2138,126 @@ def test_season_progress_uses_complete_range_after_split_start():
     assert progress > 0.5
 
 
+def test_season_end_remaining_formats_days_and_hours_with_injected_now():
+    main_module = _load_main_module()
+    season = _season_29(main_module)
+
+    remaining = main_module.Main._format_season_end_remaining(
+        season,
+        now=datetime(2026, 7, 22, 12, tzinfo=timezone.utc),
+    )
+
+    assert remaining == "距赛季结束 13天 6小时"
+
+
+def test_season_end_remaining_keeps_zero_days_when_less_than_one_day():
+    main_module = _load_main_module()
+    season = _season_29(main_module)
+
+    remaining = main_module.Main._format_season_end_remaining(
+        season,
+        now=datetime(2026, 8, 4, 12, 30, tzinfo=timezone.utc),
+    )
+
+    assert remaining == "距赛季结束 0天 5小时"
+
+
+def test_season_end_remaining_uses_short_text_under_one_hour():
+    main_module = _load_main_module()
+    season = _season_29(main_module)
+
+    remaining = main_module.Main._format_season_end_remaining(
+        season,
+        now=datetime(2026, 8, 4, 17, 31, tzinfo=timezone.utc),
+    )
+
+    assert remaining == "距赛季结束 不足1小时"
+
+
+@pytest.mark.parametrize(
+    "now, expected",
+    [
+        (datetime(2026, 8, 4, 18, tzinfo=timezone.utc), "赛季已结束"),
+        (datetime(2026, 8, 5, tzinfo=timezone.utc), "赛季已结束"),
+        (datetime(2026, 5, 5, 17, tzinfo=timezone.utc), ""),
+    ],
+)
+def test_season_end_remaining_handles_end_and_not_started_states(now, expected):
+    main_module = _load_main_module()
+    season = _season_29(main_module)
+
+    assert (
+        main_module.Main._format_season_end_remaining(season, now=now)
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    "start_iso, end_iso",
+    [
+        ("", "2026-08-04T18:00:00Z"),
+        ("not-a-timestamp", "2026-08-04T18:00:00Z"),
+        ("2026-08-04T18:00:00Z", "not-a-timestamp"),
+        ("2026-08-04T18:00:00Z", "2026-08-04T18:00:00Z"),
+        ("2026-08-05T18:00:00Z", "2026-08-04T18:00:00Z"),
+    ],
+)
+def test_season_end_remaining_hides_invalid_ranges(start_iso, end_iso):
+    main_module = _load_main_module()
+    season = _season_29(main_module)
+    season.start_iso = start_iso
+    season.end_iso = end_iso
+
+    assert (
+        main_module.Main._format_season_end_remaining(
+            season,
+            now=datetime(2026, 7, 22, tzinfo=timezone.utc),
+        )
+        == ""
+    )
+
+
+def test_season_card_uses_one_injected_now_for_progress_and_countdowns(monkeypatch):
+    main_module = _load_main_module()
+    main = object.__new__(main_module.Main)
+    season = _season_29(main_module)
+    injected_now = datetime(2026, 7, 22, 12, tzinfo=timezone.utc)
+    calls = []
+
+    def record_progress(_season, now=None):
+        calls.append(("progress", now))
+        return 0.5
+
+    def record_split_remaining(_season, now=None):
+        calls.append(("split", now))
+        return ""
+
+    def record_season_remaining(_season, now=None):
+        calls.append(("season", now))
+        return "距赛季结束 13天 6小时"
+
+    monkeypatch.setattr(
+        main_module.Main,
+        "_season_progress_fraction",
+        staticmethod(record_progress),
+    )
+    monkeypatch.setattr(
+        main_module.Main,
+        "_format_split_remaining",
+        staticmethod(record_split_remaining),
+    )
+    monkeypatch.setattr(
+        main_module.Main,
+        "_format_season_end_remaining",
+        staticmethod(record_season_remaining),
+    )
+
+    main._build_season_info_card(season, now=injected_now)
+
+    assert [kind for kind, _now in calls] == ["progress", "split", "season"]
+    assert [now for _kind, now in calls] == [injected_now] * 3
+
+
 def test_season_text_uses_complete_range_and_single_prediction_warning():
     main_module = _load_main_module()
     plugin = object.__new__(main_module.Main)
@@ -2379,6 +2499,7 @@ def test_season_image_cache_key_includes_renderer_version(monkeypatch, tmp_path)
     season = _season_29(main_module)
     now = datetime(2026, 7, 10, 12, 34, tzinfo=timezone.utc)
     original_version = main_module.Main._SEASON_CARD_RENDERER_VERSION
+    assert original_version == 4
     original_key = main._season_info_image_cache_key(tmp_path, season, now=now)
 
     monkeypatch.setattr(
@@ -2508,6 +2629,71 @@ def test_season_card_draws_short_green_divider_and_required_text(monkeypatch):
     assert split_text_box[1] - max(divider_column) >= 20
 
 
+def test_season_card_draws_remaining_in_top_right_header():
+    main_module = _load_main_module()
+    main = object.__new__(main_module.Main)
+    season = _season_29(main_module)
+    text_records = _record_season_card_shadow_text(main)
+
+    image = main._build_season_info_card(
+        season,
+        now=datetime(2026, 7, 22, 12, tzinfo=timezone.utc),
+    )
+
+    date_record = next(
+        record for record in text_records if record[2] == "2026-08-05 02:00"
+    )
+    remaining_record = next(
+        record
+        for record in text_records
+        if record[2] == "距赛季结束 13天 6小时"
+    )
+    date_box = date_record[0].textbbox(
+        date_record[1], date_record[2], font=date_record[3]
+    )
+    remaining_box = remaining_record[0].textbbox(
+        remaining_record[1], remaining_record[2], font=remaining_record[3]
+    )
+    title_record = next(
+        record for record in text_records if record[2].startswith("S29 · ")
+    )
+    title_box = title_record[0].textbbox(
+        title_record[1], title_record[2], font=title_record[3]
+    )
+    source_record = next(record for record in text_records if record[2] == "来源 test")
+    source_box = source_record[0].textbbox(
+        source_record[1], source_record[2], font=source_record[3]
+    )
+
+    assert 248 <= date_box[0] < date_box[2] <= 790
+    assert 148 <= date_box[1] < date_box[3] <= 218
+    assert 560 <= remaining_box[0] < remaining_box[2] <= 810
+    assert 24 <= remaining_box[1] < remaining_box[3] <= 78
+    assert remaining_box[3] < title_box[1]
+    assert remaining_box[3] < source_box[1]
+    assert getattr(remaining_record[3], "size", 99) < getattr(date_record[3], "size", 0)
+    assert remaining_record[4][0] >= 200
+    assert remaining_record[4][1] >= 120
+    assert remaining_record[4][0] > remaining_record[4][1] > remaining_record[4][2]
+    assert image.size == (840, 360)
+
+
+def test_season_card_ended_state_uses_nonnegative_remaining_text():
+    main_module = _load_main_module()
+    main = object.__new__(main_module.Main)
+    season = _season_29(main_module)
+    text_records = _record_season_card_shadow_text(main)
+
+    main._build_season_info_card(
+        season,
+        now=datetime(2026, 8, 4, 18, tzinfo=timezone.utc),
+    )
+
+    texts = [record[2] for record in text_records]
+    assert "赛季已结束" in texts
+    assert not any("负" in text for text in texts)
+
+
 def test_season_card_only_draws_split_countdown_before_boundary():
     main_module = _load_main_module()
     season = _season_29(main_module)
@@ -2590,6 +2776,7 @@ def test_season_card_uses_readable_timeline_and_single_line_disclaimer():
     disclaimer_box = native_boxes[-1]
     assert all((box[3] - box[1]) * 0.5 >= 7.5 for box in time_boxes)
     assert getattr(disclaimer_record[3], "size", 0) >= 8
+    assert "..." not in disclaimer_text
     assert (disclaimer_box[3] - disclaimer_box[1]) * 0.5 >= 4
     assert min(disclaimer_record[4][:3]) >= 165
     assert 24 <= disclaimer_box[0] < disclaimer_box[2] <= image.width - 24
