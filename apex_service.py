@@ -1067,6 +1067,15 @@ class ApexApiClient:
             self._season_cache.pop(cache_key, None)
             return None
         now_dt = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
+        if cache_key == "season:current":
+            try:
+                start_dt, end_dt = _require_complete_season_range(season_info)
+            except RuntimeError:
+                self._season_cache.pop(cache_key, None)
+                return None
+            if not start_dt <= now_dt < end_dt:
+                self._season_cache.pop(cache_key, None)
+                return None
         season_info.status_text = _resolve_season_status(
             season_info.start_iso,
             season_info.end_iso,
@@ -2325,6 +2334,25 @@ def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
+def _normalize_season_boundary_to_beijing_one(value: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized or "T" not in normalized:
+        return normalized
+    try:
+        parsed_text = (
+            f"{normalized[:-1]}+00:00" if normalized.endswith("Z") else normalized
+        )
+        parsed = datetime.fromisoformat(parsed_text)
+    except Exception:
+        return normalized
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return normalized
+
+    beijing = parsed.astimezone(SHANGHAI_TZ)
+    fixed_beijing = beijing.replace(hour=1, minute=0, second=0, microsecond=0)
+    return _to_iso_datetime(fixed_beijing)
+
+
 def _require_allowed_https_url(
     url: str,
     allowed_hosts: frozenset[str],
@@ -2354,6 +2382,8 @@ def _build_season_info(
     start_iso, end_iso = _extract_event_dates_from_jsonld(detail)
     if not end_iso:
         end_iso = _extract_countdown_target(detail) or _extract_countdown_target(home_html) or ""
+    start_iso = _normalize_season_boundary_to_beijing_one(start_iso or "")
+    end_iso = _normalize_season_boundary_to_beijing_one(end_iso or "")
     timezone_text = _extract_timezone(home_html) or _extract_timezone(detail)
     update_time_hint = _extract_update_time_hint(home_html)
 

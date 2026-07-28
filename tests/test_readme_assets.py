@@ -74,7 +74,7 @@ def test_metadata_version_is_patch_release():
     metadata_path = Path(__file__).resolve().parents[1] / "metadata.yaml"
     metadata = metadata_path.read_text(encoding="utf-8")
 
-    assert "version: 2.4.3" in metadata
+    assert "version: 2.4.4" in metadata
 
 
 def test_season_remaining_time_is_documented_in_readme_and_metadata():
@@ -84,6 +84,8 @@ def test_season_remaining_time_is_documented_in_readme_and_metadata():
 
     for content in (readme, metadata):
         assert "赛季结束时间和剩余时间" in content
+
+    assert "赛季开始、结束和新赛季切换边界统一按北京时间凌晨 1 点" in readme
 
 
 def test_readme_intro_mentions_codex_assistance():

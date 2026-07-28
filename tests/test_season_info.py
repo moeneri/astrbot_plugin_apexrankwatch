@@ -60,6 +60,15 @@ def _season_with_range(start_iso: str, end_iso: str):
     )
 
 
+def test_fixed_beijing_one_boundary_is_not_shifted_again():
+    assert (
+        apex_service._normalize_season_boundary_to_beijing_one(
+            "2026-08-04T17:00:00Z"
+        )
+        == "2026-08-04T17:00:00Z"
+    )
+
+
 def test_current_season_uses_complete_apexseasons_range():
     detail_url = "https://apexseasons.online/seasons/season-29-overclocked/"
     home_html = f'''<script type="application/ld+json">{{
@@ -94,8 +103,10 @@ def test_current_season_uses_complete_apexseasons_range():
 
     assert season.season_number == 29
     assert season.season_name == "Overclocked"
-    assert season.start_iso == "2026-05-05T18:00:00Z"
-    assert season.end_iso == "2026-08-04T18:00:00Z"
+    assert season.start_iso == "2026-05-05T17:00:00Z"
+    assert season.end_iso == "2026-08-04T17:00:00Z"
+    assert season.start_date == "2026-05-06 01:00 北京时间"
+    assert season.end_date == "2026-08-05 01:00 北京时间"
     assert season.end_iso != "2026-09-22T17:00:00Z"
     assert season.source == "apexseasons.online"
     assert season.supports_ranked_splits is True
@@ -182,6 +193,53 @@ def test_current_fetch_skips_upcoming_first_reference():
     )
 
     assert season.season_number == 29
+
+
+def test_current_fetch_switches_to_next_season_at_fixed_beijing_boundary():
+    upcoming_url = "https://apexseasons.online/seasons/season-30/"
+    current_url = "https://apexseasons.online/seasons/season-29/"
+    home_html = f'''<script type="application/ld+json">{{
+      "@type": "ItemList",
+      "itemListElement": [
+        {{
+          "position": 1,
+          "name": "Season 30 Future Shock",
+          "url": "{upcoming_url}"
+        }},
+        {{
+          "position": 2,
+          "name": "Season 29 Overclocked",
+          "url": "{current_url}"
+        }}
+      ]
+    }}</script>'''
+    client = _client_with_pages(
+        {
+            apex_service.APEX_SEASONS_HOME_URL: home_html,
+            upcoming_url: '''<script type="application/ld+json">{
+              "@type": "Event",
+              "startDate": "2026-08-04T18:00:00Z",
+              "endDate": "2026-11-03T18:00:00Z"
+            }</script>''',
+            current_url: '''<script type="application/ld+json">{
+              "@type": "Event",
+              "startDate": "2026-05-05T18:00:00Z",
+              "endDate": "2026-08-04T18:00:00Z"
+            }</script>''',
+        }
+    )
+
+    season = asyncio.run(
+        client._fetch_season_from_apexseasons(
+            None,
+            use_public_split_index=False,
+            now=datetime(2026, 8, 4, 17, tzinfo=timezone.utc),
+        )
+    )
+
+    assert season.season_number == 30
+    assert season.start_iso == "2026-08-04T17:00:00Z"
+    assert season.status_text == "进行中"
 
 
 def test_current_fetch_skips_stale_first_reference():
@@ -765,3 +823,43 @@ def test_cached_season_refreshes_derived_state_on_each_hit():
     assert after.current_split_label == "下半赛季"
     assert after.current_split_index == 2
     assert after.next_transition_label == "赛季结束"
+
+
+def test_current_season_cache_expires_at_fixed_beijing_end_boundary():
+    season = _season_with_range(
+        "2026-05-05T17:00:00Z",
+        "2026-08-04T17:00:00Z",
+    )
+    client = _client_with_pages({})
+    client._season_cache["season:current"] = (
+        apex_service.time.monotonic(),
+        season,
+    )
+
+    cached = client._get_cached_season(
+        "season:current",
+        now=datetime(2026, 8, 4, 17, tzinfo=timezone.utc),
+    )
+
+    assert cached is None
+    assert "season:current" not in client._season_cache
+
+
+def test_numbered_season_cache_remains_available_after_end_boundary():
+    season = _season_with_range(
+        "2026-05-05T17:00:00Z",
+        "2026-08-04T17:00:00Z",
+    )
+    client = _client_with_pages({})
+    client._season_cache["season:29"] = (
+        apex_service.time.monotonic(),
+        season,
+    )
+
+    cached = client._get_cached_season(
+        "season:29",
+        now=datetime(2026, 8, 4, 17, tzinfo=timezone.utc),
+    )
+
+    assert cached is season
+    assert cached.status_text == "已结束"

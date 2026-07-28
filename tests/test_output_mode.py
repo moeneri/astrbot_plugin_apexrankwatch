@@ -121,12 +121,12 @@ def _season_29(main_module):
         update_time_hint="",
         source="test",
         season_url="",
-        start_iso="2026-05-05T18:00:00Z",
-        end_iso="2026-08-04T18:00:00Z",
+        start_iso="2026-05-05T17:00:00Z",
+        end_iso="2026-08-04T17:00:00Z",
         current_split_label="下半赛季",
         current_split_index=2,
         next_transition_label="赛季结束",
-        next_transition_iso="2026-08-04T18:00:00Z",
+        next_transition_iso="2026-08-04T17:00:00Z",
         split_source="推导",
         split_note=split_note,
         supports_ranked_splits=True,
@@ -135,9 +135,9 @@ def _season_29(main_module):
                 index=1,
                 label="Split 1",
                 stage_name="上半赛季",
-                start_iso="2026-05-05T18:00:00Z",
+                start_iso="2026-05-05T17:00:00Z",
                 end_iso="2026-06-23T17:00:00Z",
-                start_date="2026-05-06 02:00 北京时间",
+                start_date="2026-05-06 01:00 北京时间",
                 end_date="2026-06-24 01:00 北京时间",
                 source="推导",
                 exact=False,
@@ -148,9 +148,9 @@ def _season_29(main_module):
                 label="Split 2",
                 stage_name="下半赛季",
                 start_iso="2026-06-23T17:00:00Z",
-                end_iso="2026-08-04T18:00:00Z",
+                end_iso="2026-08-04T17:00:00Z",
                 start_date="2026-06-24 01:00 北京时间",
-                end_date="2026-08-05 02:00 北京时间",
+                end_date="2026-08-05 01:00 北京时间",
                 source="推导",
                 exact=False,
                 note=split_note,
@@ -2147,7 +2147,7 @@ def test_season_end_remaining_formats_days_and_hours_with_injected_now():
         now=datetime(2026, 7, 22, 12, tzinfo=timezone.utc),
     )
 
-    assert remaining == "距赛季结束 13天 6小时"
+    assert remaining == "距赛季结束 13天 5小时"
 
 
 def test_season_end_remaining_keeps_zero_days_when_less_than_one_day():
@@ -2159,7 +2159,7 @@ def test_season_end_remaining_keeps_zero_days_when_less_than_one_day():
         now=datetime(2026, 8, 4, 12, 30, tzinfo=timezone.utc),
     )
 
-    assert remaining == "距赛季结束 0天 5小时"
+    assert remaining == "距赛季结束 0天 4小时"
 
 
 def test_season_end_remaining_uses_short_text_under_one_hour():
@@ -2168,7 +2168,7 @@ def test_season_end_remaining_uses_short_text_under_one_hour():
 
     remaining = main_module.Main._format_season_end_remaining(
         season,
-        now=datetime(2026, 8, 4, 17, 31, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 4, 16, 31, tzinfo=timezone.utc),
     )
 
     assert remaining == "距赛季结束 不足1小时"
@@ -2179,7 +2179,7 @@ def test_season_end_remaining_uses_short_text_under_one_hour():
     [
         (datetime(2026, 8, 4, 18, tzinfo=timezone.utc), "赛季已结束"),
         (datetime(2026, 8, 5, tzinfo=timezone.utc), "赛季已结束"),
-        (datetime(2026, 5, 5, 17, tzinfo=timezone.utc), ""),
+        (datetime(2026, 5, 5, 16, 59, 59, tzinfo=timezone.utc), ""),
     ],
 )
 def test_season_end_remaining_handles_end_and_not_started_states(now, expected):
@@ -2270,8 +2270,8 @@ def test_season_text_uses_complete_range_and_single_prediction_warning():
         "下半赛季分界按完整赛季中点后首个北京时间周三 01:00 "
         "推测，可能不完全准确，仅供参考。"
     )
-    assert "2026-05-06 02:00" in output
-    assert "2026-08-05 02:00" in output
+    assert "2026-05-06 01:00" in output
+    assert "2026-08-05 01:00" in output
     assert "当前阶段: 下半赛季" in output
     assert warning in output
     assert output.count(warning) == 1
@@ -2369,7 +2369,7 @@ def test_split_countdown_is_empty_before_season_start():
 
     assert main_module.Main._format_split_remaining(
         season,
-        now=datetime(2026, 5, 5, 17, 59, 59, tzinfo=timezone.utc),
+        now=datetime(2026, 5, 5, 16, 59, 59, tzinfo=timezone.utc),
     ) == ""
 
 
@@ -2641,12 +2641,12 @@ def test_season_card_draws_remaining_in_top_right_header():
     )
 
     date_record = next(
-        record for record in text_records if record[2] == "2026-08-05 02:00"
+        record for record in text_records if record[2] == "2026-08-05 01:00"
     )
     remaining_record = next(
         record
         for record in text_records
-        if record[2] == "距赛季结束 13天 6小时"
+        if record[2] == "距赛季结束 13天 5小时"
     )
     date_box = date_record[0].textbbox(
         date_record[1], date_record[2], font=date_record[3]
@@ -2755,9 +2755,9 @@ def test_season_card_uses_readable_timeline_and_single_line_disclaimer():
     assert getattr(record_for("赛季开始")[3], "size", 0) >= 17
     assert getattr(record_for("赛季结束")[3], "size", 0) >= 17
     time_texts = (
-        "2026-05-06 周三 02:00",
+        "2026-05-06 周三 01:00",
         "2026-06-24 周三 01:00",
-        "2026-08-05 周三 02:00",
+        "2026-08-05 周三 01:00",
     )
     time_records = [record_for(text) for text in time_texts]
     assert all(getattr(record[3], "size", 0) >= 16 for record in time_records)
