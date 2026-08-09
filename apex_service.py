@@ -29,6 +29,8 @@ APEX_SEASONS_ALLOWED_HOSTS = frozenset(
 )
 APEX_SEASONS_MAX_REDIRECTS = 4
 APEX_SEASONS_CURRENT_CANDIDATE_LIMIT = 4
+EA_APEX_HOME_URL = "https://www.ea.com/games/apex-legends/apex-legends"
+EA_APEX_ALLOWED_HOSTS = frozenset({"ea.com", "www.ea.com"})
 ESPORTSTALES_SEASONS_URL = "https://www.esportstales.com/apex-legends/season-end-date"
 APEX_STATUS_RANKED_MAP_URL = "https://apexlegendsstatus.com/current-map/battle_royale/ranked"
 APEX_STATUS_PUBS_MAP_URL = "https://apexlegendsstatus.com/current-map/battle_royale/pubs"
@@ -39,6 +41,15 @@ SEASON_MAP_POOL_LOCK_AFTER_END_SECS = 12 * 60 * 60
 JSONLD_SCRIPT_RE = re.compile(
     r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
     re.IGNORECASE | re.DOTALL,
+)
+NEXT_DATA_SCRIPT_RE = re.compile(
+    r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
+    re.IGNORECASE | re.DOTALL,
+)
+EA_CURRENT_SEASON_LINK_RE = re.compile(
+    r'href=["\'](?P<url>[^"\']*/games/apex-legends/apex-legends/seasons/'
+    r'[a-z0-9][a-z0-9-]*/?)["\']',
+    re.IGNORECASE,
 )
 SEASON_LIVE_RE = re.compile(
     r"Season\s+(\d+)\s*[·•:：\-–—]?\s*([^\n]+?)\s+is\s+live\s+now",
@@ -632,13 +643,64 @@ class ApexApiClient:
             if cached is not None:
                 return cached
 
-            season_info = await self._fetch_season_from_apexseasons(
-                None,
-                use_public_split_index=False,
-                now=effective_now,
-            )
+            try:
+                season_info = await self._fetch_season_from_apexseasons(
+                    None,
+                    use_public_split_index=False,
+                    now=effective_now,
+                )
+            except Exception as primary_error:
+                self._logger.warning(
+                    "公开倒计时页面未提供有效当前赛季，正在回退 EA 官方赛季页: "
+                    f"{primary_error}"
+                )
+                try:
+                    season_info = await self._fetch_current_season_from_ea(
+                        now=effective_now,
+                    )
+                except Exception as fallback_error:
+                    self._logger.warning(
+                        f"EA 官方赛季页回退失败: {fallback_error}"
+                    )
+                    raise RuntimeError(
+                        f"{primary_error}；EA 官方赛季页回退失败: {fallback_error}"
+                    ) from fallback_error
             self._season_cache[cache_key] = (time.monotonic(), season_info)
             return season_info
+
+    async def _fetch_current_season_from_ea(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> SeasonInfo:
+        home_url = _require_allowed_https_url(
+            EA_APEX_HOME_URL,
+            EA_APEX_ALLOWED_HOSTS,
+        )
+        home_html = await self._request_text_with_retry(
+            home_url,
+            allowed_hosts=EA_APEX_ALLOWED_HOSTS,
+        )
+        season_url = _extract_ea_current_season_url(home_html)
+        season_url = _require_allowed_https_url(
+            season_url,
+            EA_APEX_ALLOWED_HOSTS,
+        )
+        detail_html = await self._request_text_with_retry(
+            season_url,
+            allowed_hosts=EA_APEX_ALLOWED_HOSTS,
+        )
+        effective_now = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
+        season_info = _build_ea_season_info(
+            detail_html,
+            season_url=season_url,
+            now=effective_now,
+        )
+        start, end = _require_complete_season_range(season_info)
+        if not start <= effective_now < end:
+            raise RuntimeError("EA 官方赛季页未提供包含当前时间的完整赛季数据")
+        _apply_ranked_split_details(season_info, {}, now=effective_now)
+        return season_info
 
     async def _fetch_season_from_apexseasons(
         self,
@@ -2259,6 +2321,135 @@ def _extract_jsonld_items(html: str) -> list[dict[str, Any]]:
         elif isinstance(parsed, list):
             items.extend(item for item in parsed if isinstance(item, dict))
     return items
+
+
+def _extract_ea_current_season_url(home_html: str) -> str:
+    for match in EA_CURRENT_SEASON_LINK_RE.finditer(home_html or ""):
+        candidate = urljoin(
+            EA_APEX_HOME_URL,
+            unescape(match.group("url")).strip(),
+        )
+        return _require_allowed_https_url(candidate, EA_APEX_ALLOWED_HOSTS)
+    raise RuntimeError("无法从 EA 官方首页提取当前赛季链接")
+
+
+def _find_named_dict(value: Any, names: tuple[str, ...]) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        for name in names:
+            candidate = value.get(name)
+            if isinstance(candidate, dict):
+                return candidate
+        for candidate in value.values():
+            found = _find_named_dict(candidate, names)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for candidate in value:
+            found = _find_named_dict(candidate, names)
+            if found is not None:
+                return found
+    return None
+
+
+def _extract_ea_season_details(detail_html: str) -> dict[str, Any]:
+    match = NEXT_DATA_SCRIPT_RE.search(detail_html or "")
+    if not match:
+        raise RuntimeError("EA 官方赛季页缺少机器可读数据")
+    try:
+        payload = json.loads(match.group(1).strip())
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("EA 官方赛季页机器可读数据格式无效") from exc
+
+    details = _find_named_dict(
+        payload,
+        ("seasonDetails", "seasonDetailsFallback"),
+    )
+    if details is None:
+        raise RuntimeError("EA 官方赛季页缺少当前赛季详情")
+    return details
+
+
+def _iter_text_values(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for candidate in value.values():
+            yield from _iter_text_values(candidate)
+    elif isinstance(value, list):
+        for candidate in value:
+            yield from _iter_text_values(candidate)
+
+
+def _extract_ea_season_number(details: dict[str, Any]) -> int | None:
+    identity_sections = [
+        details.get("meta"),
+        details.get("logo"),
+        details.get("headerMedia"),
+        details.get("backgroundVideo"),
+    ]
+    for text in _iter_text_values(identity_sections):
+        match = re.search(r"\bseason\s+(\d+)\b", text, re.IGNORECASE)
+        if match:
+            return _to_int(match.group(1))
+    for text in _iter_text_values(identity_sections):
+        match = re.search(r"(?<![A-Za-z0-9])S(\d+)(?!\d)", text, re.IGNORECASE)
+        if match:
+            return _to_int(match.group(1))
+    return None
+
+
+def _extract_ea_season_name(details: dict[str, Any]) -> str:
+    meta = details.get("meta") if isinstance(details.get("meta"), dict) else {}
+    for candidate in (meta.get("title"), details.get("title")):
+        text = str(candidate or "").strip()
+        match = re.search(r"APEX\s+LEGENDS(?:™)?\s*[:：]\s*(.+)$", text, re.IGNORECASE)
+        if not match:
+            continue
+        name = match.group(1).strip(" .")
+        return name.title() if name.isupper() else name
+
+    slug = str(details.get("slug") or "").strip(" -")
+    return slug.replace("-", " ").title()
+
+
+def _build_ea_season_info(
+    detail_html: str,
+    *,
+    season_url: str,
+    now: datetime | None = None,
+) -> SeasonInfo:
+    details = _extract_ea_season_details(detail_html)
+    background_video = (
+        details.get("backgroundVideo")
+        if isinstance(details.get("backgroundVideo"), dict)
+        else {}
+    )
+    start_iso = _normalize_season_boundary_to_beijing_one(
+        str(details.get("startDate") or background_video.get("publishingDate") or "")
+    )
+    end_iso = _normalize_season_boundary_to_beijing_one(
+        str(details.get("endDate") or "")
+    )
+    season_number = _extract_ea_season_number(details)
+    season_name = _extract_ea_season_name(details)
+    if season_number is None:
+        raise RuntimeError("无法从 EA 官方赛季页提取赛季编号")
+    if not season_name:
+        raise RuntimeError("无法从 EA 官方赛季页提取赛季名称")
+
+    return SeasonInfo(
+        season_number=season_number,
+        season_name=season_name,
+        start_date=_format_iso_date(start_iso) if start_iso else "未知",
+        end_date=_format_iso_date(end_iso) if end_iso else "未知",
+        timezone="北京时间 (UTC+8)",
+        update_time_hint="北京时间 01:00",
+        source="ea.com",
+        season_url=season_url,
+        start_iso=start_iso,
+        end_iso=end_iso,
+        status_text=_resolve_season_status(start_iso, end_iso, now=now),
+    )
 
 
 def _extract_season_references(home_html: str) -> list[_SeasonReference]:

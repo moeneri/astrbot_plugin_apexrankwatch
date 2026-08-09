@@ -13,6 +13,7 @@ def _client_with_pages(
     requested_urls: list[str] | None = None,
 ):
     client = object.__new__(apex_service.ApexApiClient)
+    client._logger = _SilentLogger()
     client._season_cache_ttl_seconds = 1800
     client._season_cache = {}
     client._season_lock = asyncio.Lock()
@@ -60,6 +61,48 @@ def _season_with_range(start_iso: str, end_iso: str):
     )
 
 
+def _ea_home_html(season_url: str) -> str:
+    return f'<a href="{season_url}">Current season</a>'
+
+
+def _ea_detail_html(
+    *,
+    slug: str = "marked",
+    season_number: int = 30,
+    start_iso: str = "2026-08-04T10:00:00.000-07:00",
+    end_iso: str = "2026-11-04T08:00:00.000-07:00",
+) -> str:
+    payload = {
+        "props": {
+            "pageProps": {
+                "seasonDetailsFallback": {
+                    "slug": slug,
+                    "title": f"APEX LEGENDS™: {slug.upper()}",
+                    "endDate": end_iso,
+                    "meta": {
+                        "title": f"APEX LEGENDS™: {slug.upper()}",
+                        "image": {
+                            "alternateText": (
+                                f"Apex Legends key art for season {season_number}: "
+                                f"{slug.title()}."
+                            )
+                        },
+                    },
+                    "backgroundVideo": {
+                        "name": f"APEX-S{season_number}_Gameplay_hero-bg",
+                        "publishingDate": start_iso,
+                    },
+                }
+            }
+        }
+    }
+    return (
+        '<script id="__NEXT_DATA__" type="application/json">'
+        + json.dumps(payload)
+        + "</script>"
+    )
+
+
 def test_fixed_beijing_one_boundary_is_not_shifted_again():
     assert (
         apex_service._normalize_season_boundary_to_beijing_one(
@@ -67,6 +110,89 @@ def test_fixed_beijing_one_boundary_is_not_shifted_again():
         )
         == "2026-08-04T17:00:00Z"
     )
+
+
+def test_current_season_falls_back_to_ea_when_countdown_site_is_stale():
+    stale_url = "https://apexseasons.online/seasons/season-29-overclocked/"
+    ea_season_url = (
+        "https://www.ea.com/games/apex-legends/apex-legends/seasons/marked"
+    )
+    home_html = f'''<script type="application/ld+json">{{
+      "@type": "ItemList",
+      "itemListElement": [{{
+        "position": 1,
+        "name": "Season 29 Overclocked",
+        "url": "{stale_url}"
+      }}]
+    }}</script>'''
+    stale_html = '''<script type="application/ld+json">{
+      "@type": "Event",
+      "startDate": "2026-05-05T18:00:00Z",
+      "endDate": "2026-08-04T18:00:00Z"
+    }</script>'''
+    requested_urls: list[str] = []
+    client = _client_with_pages(
+        {
+            apex_service.APEX_SEASONS_HOME_URL: home_html,
+            stale_url: stale_html,
+            apex_service.EA_APEX_HOME_URL: _ea_home_html(ea_season_url),
+            ea_season_url: _ea_detail_html(),
+        },
+        requested_urls,
+    )
+
+    season = asyncio.run(
+        client.fetch_current_season_info(
+            now=datetime(2026, 8, 9, tzinfo=timezone.utc),
+        )
+    )
+
+    assert season.season_number == 30
+    assert season.season_name == "Marked"
+    assert season.start_iso == "2026-08-04T17:00:00Z"
+    assert season.end_iso == "2026-11-03T17:00:00Z"
+    assert season.start_date == "2026-08-05 01:00 北京时间"
+    assert season.end_date == "2026-11-04 01:00 北京时间"
+    assert season.status_text == "进行中"
+    assert season.source == "ea.com"
+    assert season.season_url == ea_season_url
+    assert season.supports_ranked_splits is True
+    assert season.split_source == "推导"
+    assert requested_urls == [
+        apex_service.APEX_SEASONS_HOME_URL,
+        stale_url,
+        apex_service.EA_APEX_HOME_URL,
+        ea_season_url,
+    ]
+
+
+def test_ea_fallback_rejects_season_range_that_does_not_include_now():
+    ea_season_url = (
+        "https://www.ea.com/games/apex-legends/apex-legends/seasons/marked"
+    )
+    client = _client_with_pages(
+        {
+            apex_service.EA_APEX_HOME_URL: _ea_home_html(ea_season_url),
+            ea_season_url: _ea_detail_html(),
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="包含当前时间"):
+        asyncio.run(
+            client._fetch_current_season_from_ea(
+                now=datetime(2027, 1, 1, tzinfo=timezone.utc),
+            )
+        )
+
+
+def test_ea_current_season_link_rejects_unapproved_host():
+    unsafe_home = (
+        '<a href="https://example.com/games/apex-legends/apex-legends/'
+        'seasons/marked">Current season</a>'
+    )
+
+    with pytest.raises(RuntimeError, match="URL"):
+        apex_service._extract_ea_current_season_url(unsafe_home)
 
 
 def test_current_season_uses_complete_apexseasons_range():

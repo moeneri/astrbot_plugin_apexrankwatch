@@ -7793,7 +7793,10 @@ class Main(Star):
             lines.append(f"🧩 排位阶段: {season_info.split_note}")
 
         lines.append(f"ℹ️ 数据来源: {season_info.source}")
-        lines.append("⚠️ 第三方来源仅供参考")
+        if str(season_info.source or "").strip().lower() == "ea.com":
+            lines.append("ℹ️ 赛季时间以游戏内实际显示为准")
+        else:
+            lines.append("⚠️ 第三方来源仅供参考")
         return "\n".join(lines)
 
     @staticmethod

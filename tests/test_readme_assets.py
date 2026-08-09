@@ -74,7 +74,7 @@ def test_metadata_version_is_patch_release():
     metadata_path = Path(__file__).resolve().parents[1] / "metadata.yaml"
     metadata = metadata_path.read_text(encoding="utf-8")
 
-    assert "version: 2.4.4" in metadata
+    assert "version: 2.4.5" in metadata
 
 
 def test_season_remaining_time_is_documented_in_readme_and_metadata():
@@ -176,5 +176,6 @@ def test_readme_bottom_documents_data_and_api_sources():
     assert "## 数据来源" in readme
     assert "Apex Legends API" in source_section
     assert "api.mozambiquehe.re" in source_section
-    assert "apexlegendsstatus.com" in source_section
+    assert "apexseasons.online" in source_section
+    assert "EA 官方当前赛季页" in source_section
     assert "实时返回为准" in source_section

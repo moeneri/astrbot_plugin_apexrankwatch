@@ -2281,6 +2281,20 @@ def test_season_text_uses_complete_range_and_single_prediction_warning():
     assert "2026-09-23" not in output
 
 
+def test_season_text_marks_ea_fallback_as_official_source():
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._time_line = lambda: "现在"
+    season = _season_29(main_module)
+    season.source = "ea.com"
+
+    output = plugin._format_season_info(season)
+
+    assert "ℹ️ 数据来源: ea.com" in output
+    assert "ℹ️ 赛季时间以游戏内实际显示为准" in output
+    assert "⚠️ 第三方来源仅供参考" not in output
+
+
 def test_season_text_preserves_source_warning_for_inexact_public_split():
     main_module = _load_main_module()
     plugin = object.__new__(main_module.Main)
