@@ -1933,6 +1933,80 @@ def test_score_change_chart_renderer_creates_png(tmp_path):
     assert path.stat().st_size > 1000
 
 
+def test_score_change_report_payload_adapts_plugin_history():
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    record = _watch_record(
+        main_module,
+        score=12120,
+        player_name="测试玩家",
+    )
+    first = _history_record(
+        main_module,
+        captured_at=1_780_000_000_000,
+        from_score=11920,
+        to_score=11980,
+        player_name="测试玩家",
+    )
+    second = _history_record(
+        main_module,
+        captured_at=1_780_000_060_000,
+        from_score=11980,
+        to_score=12120,
+        player_name="测试玩家",
+    )
+    first.from_rank_name = "Platinum"
+    first.from_rank_div = 1
+    first.to_rank_name = "Platinum"
+    first.to_rank_div = 1
+    second.from_rank_name = "Platinum"
+    second.from_rank_div = 1
+    second.to_rank_name = "Diamond"
+    second.to_rank_div = 4
+    record.rank_name = "Diamond"
+    record.rank_div = 4
+    record.history = [first, second]
+
+    payload = plugin._score_change_report_payload([record], 20)
+
+    assert payload["range_label"] == "最近 20 次分数变化"
+    assert payload["recent_events"] is True
+    assert payload["chart_x_axis"] == "count"
+    assert [event["score_delta"] for event in payload["change_events"]] == [
+        140,
+        60,
+    ]
+    assert payload["change_events"][0]["rank_changed"] is True
+    assert payload["change_events"][0]["rank_asset_file"] == "diamond_4.png"
+    assert payload["series"][0]["change_points"][1]["show_rank_icon"] is True
+    assert payload["summaries"][0]["recent_event_delta_score"] == 200
+    assert payload["summaries"][0]["latest_rank_label"] == "Diamond 4"
+
+
+def test_score_change_chart_uses_reference_dashboard_dimensions(tmp_path):
+    main_module = _load_main_module()
+    plugin = object.__new__(main_module.Main)
+    plugin._config = _plugin_config(main_module, output_mode="image")
+    plugin._data_dir = tmp_path
+    record = _watch_record(main_module, score=12120)
+    record.rank_name = "Diamond"
+    record.rank_div = 4
+    record.history = [
+        _history_record(
+            main_module,
+            captured_at=1_780_000_000_000,
+            from_score=11980,
+            to_score=12120,
+        )
+    ]
+
+    image = plugin._build_score_change_chart([record], 20)
+
+    assert image.width == 1920
+    assert image.height > 1080
+    assert image.mode == "RGB"
+
+
 def test_score_change_event_panel_does_not_render_mode_column(monkeypatch, tmp_path):
     main_module = _load_main_module()
     plugin = object.__new__(main_module.Main)

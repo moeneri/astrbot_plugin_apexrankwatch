@@ -74,7 +74,7 @@ def test_metadata_version_is_patch_release():
     metadata_path = Path(__file__).resolve().parents[1] / "metadata.yaml"
     metadata = metadata_path.read_text(encoding="utf-8")
 
-    assert "version: 2.4.5" in metadata
+    assert "version: 2.4.6" in metadata
 
 
 def test_season_remaining_time_is_documented_in_readme_and_metadata():

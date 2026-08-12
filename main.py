@@ -4,8 +4,9 @@ import asyncio
 import hashlib
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -49,6 +50,11 @@ if __package__:
         normalize_watch_mode,
         trim_score_history,
     )
+    from .score_report_renderer import (
+        configure_font_paths as configure_score_report_font_paths,
+        render_dashboard_image_png,
+    )
+    from .score_report_rank_assets import rank_asset_file_for_label
     from .utils import SHANGHAI_TZ, coerce_bool, coerce_int, now_epoch_ms, now_str
 else:
     from apex_service import (
@@ -79,6 +85,11 @@ else:
         normalize_watch_mode,
         trim_score_history,
     )
+    from score_report_renderer import (
+        configure_font_paths as configure_score_report_font_paths,
+        render_dashboard_image_png,
+    )
+    from score_report_rank_assets import rank_asset_file_for_label
     from utils import SHANGHAI_TZ, coerce_bool, coerce_int, now_epoch_ms, now_str
 
 
@@ -209,7 +220,7 @@ class Main(Star):
     _MONITOR_LIST_ROW_LIMIT = 8
     _SCORE_CHANGE_DEFAULT_LIMIT = 20
     _SCORE_CHANGE_MAX_LIMIT = SCORE_HISTORY_LIMIT
-    _SCORE_CHANGE_CHART_WIDTH = 1800
+    _SCORE_CHANGE_CHART_WIDTH = 1920
     _PREDATOR_IMAGE_CACHE_TTL_SECONDS = 60
     _PREDATOR_GREEN = (88, 210, 126, 255)
     _PREDATOR_DEEP_RED = (158, 31, 36, 255)
@@ -3921,39 +3932,303 @@ class Main(Star):
         self._cleanup_generated_images(output_dir, "score_change_*.png", keep=12)
         return output_path
 
-    def _build_score_change_chart(self, players: list[PlayerRecord], limit: int):
-        limit = self._clamp_score_change_limit(limit)
-        events_desc = self._recent_score_change_events(players, limit)
-        events = list(reversed(events_desc))
-        width = self._SCORE_CHANGE_CHART_WIDTH
-        margin = 44
-        gap = 22
-        header_h = 226
-        chart_h = 700
-        summary_h = 112 + max(1, len(players)) * 196
-        row_h = 88
-        event_h = 136 + max(1, len(events_desc)) * row_h + 34
-        height = margin * 2 + header_h + gap + chart_h + gap + summary_h + gap + event_h
+    @staticmethod
+    def _score_change_iso_time(captured_at: int) -> str:
+        try:
+            value = datetime.fromtimestamp(
+                int(captured_at) / 1000,
+                timezone.utc,
+            )
+        except (TypeError, ValueError, OSError):
+            value = datetime.now(timezone.utc)
+        return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-        canvas = Image.new("RGBA", (width, height), (8, 18, 30, 255))
-        draw = ImageDraw.Draw(canvas)
-        self._draw_score_change_background(canvas)
-
-        header = (margin, margin, width - margin, margin + header_h)
-        chart = (margin, header[3] + gap, width - margin, header[3] + gap + chart_h)
-        summary = (margin, chart[3] + gap, width - margin, chart[3] + gap + summary_h)
-        event_panel = (
-            margin,
-            summary[3] + gap,
-            width - margin,
-            summary[3] + gap + event_h,
+    def _score_change_rank_asset_file(
+        self,
+        rank_name: str,
+        rank_div: int = 0,
+    ) -> str:
+        return rank_asset_file_for_label(
+            self._rank_label_from_parts(rank_name, rank_div)
         )
 
-        self._draw_score_change_header(draw, header, players, len(events_desc), limit)
-        self._draw_score_change_chart_panel(canvas, draw, chart, players, events)
-        self._draw_score_change_summary_panel(canvas, draw, summary, players, events_desc)
-        self._draw_score_change_event_panel(draw, event_panel, events_desc)
-        return canvas.convert("RGB")
+    def _score_change_report_payload(
+        self,
+        players: list[PlayerRecord],
+        limit: int,
+    ) -> dict:
+        limit = self._clamp_score_change_limit(limit)
+        events_desc = self._recent_score_change_events(players, limit)
+        event_ids = {
+            (id(player), id(item)): index
+            for index, (player, item) in enumerate(
+                reversed(events_desc),
+                start=1,
+            )
+        }
+        player_ids = {id(player): index for index, player in enumerate(players, start=1)}
+        series: list[dict] = []
+        summaries: list[dict] = []
+
+        for player in players:
+            player_id = player_ids[id(player)]
+            visible_events = [
+                item for owner, item in reversed(events_desc) if owner is player
+            ]
+            all_events = sorted(
+                self._score_history_items(player),
+                key=lambda item: item.captured_at,
+            )
+            line_points: list[dict] = []
+            change_points: list[dict] = []
+
+            for event_index, item in enumerate(visible_events):
+                event_id = event_ids[(id(player), id(item))]
+                captured_at = self._score_change_iso_time(item.captured_at)
+                rank_label = self._history_to_rank_label(item)
+                if event_index == 0:
+                    baseline_at = datetime.fromtimestamp(
+                        int(item.captured_at) / 1000,
+                        timezone.utc,
+                    ) - timedelta(seconds=1)
+                    line_points.append(
+                        {
+                            "snapshot_id": -event_id,
+                            "captured_at": baseline_at.replace(
+                                microsecond=0
+                            ).isoformat().replace("+00:00", "Z"),
+                            "captured_at_local": self._format_score_history_time(
+                                item.captured_at
+                            ),
+                            "rank_score": int(item.from_score),
+                            "rank_label": self._history_from_rank_label(item),
+                            "rank_icon_file": self._score_change_rank_asset_file(
+                                item.from_rank_name,
+                                item.from_rank_div,
+                            ),
+                            "event_ids": [event_id],
+                        }
+                    )
+                line_points.append(
+                    {
+                        "snapshot_id": event_id,
+                        "captured_at": captured_at,
+                        "captured_at_local": self._format_score_history_time(
+                            item.captured_at
+                        ),
+                        "rank_score": int(item.to_score),
+                        "rank_label": rank_label,
+                        "rank_icon_file": self._score_change_rank_asset_file(
+                            item.to_rank_name,
+                            item.to_rank_div,
+                        ),
+                        "event_ids": [event_id],
+                    }
+                )
+                rank_changed = self._score_history_rank_changed(item)
+                change_points.append(
+                    {
+                        "event_id": event_id,
+                        "captured_at": captured_at,
+                        "captured_at_local": self._format_score_history_time(
+                            item.captured_at
+                        ),
+                        "rank_score": int(item.to_score),
+                        "rank_label": rank_label,
+                        "score_delta": int(item.score_delta),
+                        "rank_changed": rank_changed,
+                        "rank_icon_file": self._score_change_rank_asset_file(
+                            item.to_rank_name,
+                            item.to_rank_div,
+                        ),
+                        "rank_asset_file": self._score_change_rank_asset_file(
+                            item.to_rank_name,
+                            item.to_rank_div,
+                        ),
+                        "change_summary": "",
+                        "season_reset": bool(item.is_season_reset),
+                        "show_rank_icon": rank_changed
+                        or bool(item.is_season_reset),
+                    }
+                )
+
+            display_name = self._record_display_name(player)
+            series.append(
+                {
+                    "player_id": player_id,
+                    "display_name": display_name,
+                    "points": line_points,
+                    "line_points": line_points,
+                    "effective_bucket": "raw",
+                    "auto_expanded_timeline": False,
+                    "change_points": change_points,
+                }
+            )
+
+            visible_scores = [int(getattr(player, "rank_score", 0))]
+            for item in visible_events:
+                visible_scores.extend((int(item.from_score), int(item.to_score)))
+            recent_delta = self._score_change_net_delta(visible_events)
+            latest_history = all_events[-1] if all_events else None
+            latest_at = (
+                int(latest_history.captured_at)
+                if latest_history is not None
+                else int(getattr(player, "last_checked", 0) or 0)
+            )
+            if latest_at and latest_at < 10_000_000_000:
+                latest_at *= 1000
+            active_events: list[ScoreChangeRecord] = []
+            if all_events:
+                active_since = all_events[-1].captured_at - int(
+                    timedelta(hours=14).total_seconds() * 1000
+                )
+                active_events = [
+                    item for item in all_events if item.captured_at >= active_since
+                ]
+            first_visible = visible_events[0] if visible_events else None
+            last_visible = visible_events[-1] if visible_events else None
+            latest_rank_label = self._record_rank_display(player)
+            summaries.append(
+                {
+                    "player_id": player_id,
+                    "display_name": display_name,
+                    "latest_rank_label": latest_rank_label,
+                    "latest_rank_score": int(getattr(player, "rank_score", 0)),
+                    "latest_rank_icon_file": self._score_change_rank_asset_file(
+                        getattr(player, "rank_name", ""),
+                        getattr(player, "rank_div", 0),
+                    ),
+                    "rank_asset_file": self._score_change_rank_asset_file(
+                        getattr(player, "rank_name", ""),
+                        getattr(player, "rank_div", 0),
+                    ),
+                    "delta_score": recent_delta,
+                    "samples": len(line_points),
+                    "change_events": len(visible_events),
+                    "max_score": max(visible_scores),
+                    "min_score": min(visible_scores),
+                    "avg_score": round(
+                        sum(visible_scores) / len(visible_scores),
+                        2,
+                    ),
+                    "first_seen_at": (
+                        self._format_score_history_time(first_visible.captured_at)
+                        if first_visible is not None
+                        else ""
+                    ),
+                    "last_seen_at": (
+                        self._format_score_history_time(last_visible.captured_at)
+                        if last_visible is not None
+                        else ""
+                    ),
+                    "latest_captured_at": (
+                        self._score_change_iso_time(latest_at) if latest_at else ""
+                    ),
+                    "active_delta_score": self._score_change_net_delta(
+                        active_events
+                    ),
+                    "active_change_events": len(active_events),
+                    "active_duration_hours": 14 if active_events else 0,
+                    "recent_event_delta_score": recent_delta,
+                    "recent_event_count": len(visible_events),
+                    "recent_up_count": sum(
+                        1 for item in visible_events if item.score_delta > 0
+                    ),
+                    "recent_down_count": sum(
+                        1 for item in visible_events if item.score_delta < 0
+                    ),
+                    "recent_up_score": sum(
+                        int(item.score_delta)
+                        for item in visible_events
+                        if item.score_delta > 0
+                    ),
+                    "recent_down_score": sum(
+                        int(item.score_delta)
+                        for item in visible_events
+                        if item.score_delta < 0
+                    ),
+                }
+            )
+
+        change_events: list[dict] = []
+        for player, item in events_desc:
+            player_id = player_ids[id(player)]
+            rank_changed = self._score_history_rank_changed(item)
+            to_asset = self._score_change_rank_asset_file(
+                item.to_rank_name,
+                item.to_rank_div,
+            )
+            change_events.append(
+                {
+                    "id": event_ids[(id(player), id(item))],
+                    "player_id": player_id,
+                    "display_name": self._record_display_name(player),
+                    "captured_at": self._score_change_iso_time(item.captured_at),
+                    "captured_at_local": self._format_score_history_time(
+                        item.captured_at
+                    ),
+                    "score_delta": int(item.score_delta),
+                    "from_rank_score": int(item.from_score),
+                    "to_rank_score": int(item.to_score),
+                    "from_rank_label": self._history_from_rank_label(item),
+                    "to_rank_label": self._history_to_rank_label(item),
+                    "rank_changed": rank_changed,
+                    "rank_icon_file": to_asset,
+                    "rank_asset_file": to_asset,
+                    "rank_text": "",
+                    "change_summary": "",
+                    "season_reset": bool(item.is_season_reset),
+                }
+            )
+
+        return {
+            "range_label": f"最近 {limit} 次分数变化",
+            "bucket_label": "原始采样",
+            "bucket_auto_expanded": False,
+            "bucket_auto_expanded_players": 0,
+            "selected_season_reset_at": "",
+            "selected_season_reset_local": "",
+            "season_resets": [],
+            "series": series,
+            "summaries": summaries,
+            "players": [
+                {
+                    "id": player_ids[id(player)],
+                    "display_name": self._record_display_name(player),
+                    "latest_rank_score": int(getattr(player, "rank_score", 0)),
+                    "latest_rank_label": self._record_rank_display(player),
+                }
+                for player in players
+            ],
+            "change_events": change_events,
+            "event_limit": limit,
+            "recent_events": True,
+            "chart_x_axis": "count",
+        }
+
+    def _build_score_change_chart(self, players: list[PlayerRecord], limit: int):
+        limit = self._clamp_score_change_limit(limit)
+        font_status = self._get_cjk_font_status()
+        if not font_status.available:
+            downloaded_font = self._download_cjk_font_if_needed()
+            if downloaded_font is not None:
+                font_status = FontStatus(True, "cache", downloaded_font)
+        font_path = font_status.path if font_status.available else None
+        configure_score_report_font_paths(font_path, font_path)
+        png_bytes = render_dashboard_image_png(
+            payload=self._score_change_report_payload(players, limit),
+            icon_dir=self._RANK_ICON_DIR,
+            timezone_name="Asia/Shanghai",
+            range_key="all",
+            bucket="raw",
+            width=self._SCORE_CHANGE_CHART_WIDTH,
+            height=1080,
+            layout="full",
+            event_limit=limit,
+            x_axis="count",
+        )
+        with Image.open(BytesIO(png_bytes)) as image:
+            return image.convert("RGB")
 
     def _draw_score_change_background(self, canvas) -> None:
         width, height = canvas.size
