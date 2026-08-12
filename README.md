@@ -31,7 +31,7 @@ Apex Rank Watch 是一个面向 QQ 群使用的 AstrBot 插件，用来查询 Ap
 
 备注：统计图需要先使用 `/持续视奸` 或 `/持续记录` 添加玩家，并在后续轮询中采集到有效分数变化后才会生效。
 
-![分数变化长图示例](https://cdn.jsdelivr.net/gh/moeneri/astrbot_plugin_apexrankwatch@main/assets/readme/score_change_chart_example.png)
+![分数变化长图示例](https://cdn.jsdelivr.net/gh/moeneri/apexrankwatch-assets@97ad4c42346afa85333036192b56352540d7b053/images/score_change_chart_example_2.4.7.png)
 
 ## 常用命令
 

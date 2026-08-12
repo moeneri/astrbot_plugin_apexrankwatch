@@ -2007,6 +2007,56 @@ def test_score_change_chart_uses_reference_dashboard_dimensions(tmp_path):
     assert image.mode == "RGB"
 
 
+def test_score_report_rank_labels_are_localized_to_chinese():
+    renderer = importlib.import_module("score_report_renderer")
+
+    assert renderer._rank_label_zh("Platinum 1") == "白金 1"
+    assert renderer._rank_label_zh("Diamond IV") == "钻石 4"
+    assert renderer._rank_label_zh("Master") == "大师"
+    assert renderer._rank_label_zh("Apex Predator") == "猎杀"
+    assert renderer._rank_label_zh("未知") == "未知"
+
+
+def test_score_report_footer_contains_credit_and_generated_time(monkeypatch):
+    renderer = importlib.import_module("score_report_renderer")
+    payload = {
+        "range_label": "最近 20 次分数变化",
+        "bucket_label": "原始采样",
+        "series": [],
+        "summaries": [],
+        "change_events": [],
+        "season_resets": [],
+    }
+    drawn_text = []
+    original_text = renderer.ImageDraw.ImageDraw.text
+
+    def record_text(self, xy, text, *args, **kwargs):
+        drawn_text.append(str(text))
+        return original_text(self, xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(renderer.ImageDraw.ImageDraw, "text", record_text)
+
+    renderer.render_dashboard_image_png(
+        payload=payload,
+        icon_dir=Path("assets/ranks"),
+        timezone_name="Asia/Shanghai",
+        range_key="all",
+        bucket="raw",
+        width=1280,
+        height=720,
+        layout="full",
+        event_limit=20,
+        x_axis="count",
+    )
+
+    footer = next(
+        text
+        for text in drawn_text
+        if text.startswith("by astrbot_plugin_apexrankwatch")
+    )
+    assert "生成时间 " in footer
+
+
 def test_score_change_event_panel_does_not_render_mode_column(monkeypatch, tmp_path):
     main_module = _load_main_module()
     plugin = object.__new__(main_module.Main)

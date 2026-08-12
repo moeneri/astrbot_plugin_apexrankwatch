@@ -148,6 +148,17 @@ RANK_PROGRESS_THRESHOLDS = [
     ("大师", 16000),
 ]
 FRESHNESS_WARNING_MINUTES = 15
+REPORT_FOOTER_CREDIT = "by astrbot_plugin_apexrankwatch"
+RANK_NAME_ZH = (
+    ("猎杀", ("apex predator", "predator", "猎杀", "猎杀者")),
+    ("大师", ("master", "大师")),
+    ("钻石", ("diamond", "钻石")),
+    ("白金", ("platinum", "白金", "铂金")),
+    ("黄金", ("gold", "黄金")),
+    ("白银", ("silver", "白银")),
+    ("青铜", ("bronze", "青铜")),
+    ("新秀", ("rookie", "unranked", "菜鸟", "新秀", "未定级")),
+)
 
 
 def _data_freshness_status(
@@ -170,6 +181,52 @@ def _data_freshness_status(
     if elapsed_minutes >= max(1, int(warning_minutes)):
         return f"数据已延迟 {elapsed_minutes} 分钟", "#FDBA74"
     return f"{elapsed_minutes} 分钟前采集", MUTED_SOFT
+
+
+def _rank_label_zh(rank_label: str) -> str:
+    """Translate an Apex rank label for display while preserving its division."""
+    text = str(rank_label or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    localized_name = ""
+    matched_alias = ""
+    for canonical, aliases in RANK_NAME_ZH:
+        for alias in aliases:
+            if alias in lowered or alias in text:
+                localized_name = canonical
+                matched_alias = alias
+                break
+        if localized_name:
+            break
+    if not localized_name:
+        return text
+    if localized_name in {"大师", "猎杀"}:
+        return localized_name
+
+    division = ""
+    for char in text:
+        if char in "1234":
+            division = char
+            break
+    if not division:
+        normalized = (
+            lowered.replace("ⅳ", " iv ")
+            .replace("ⅲ", " iii ")
+            .replace("ⅱ", " ii ")
+            .replace("ⅰ", " i ")
+        )
+        tokens = normalized.replace("-", " ").replace("_", " ").split()
+        for token, value in (("iv", "4"), ("iii", "3"), ("ii", "2"), ("i", "1")):
+            if token in tokens:
+                division = value
+                break
+    if not division:
+        for token, value in (("四", "4"), ("三", "3"), ("二", "2"), ("一", "1")):
+            if token in text.replace(matched_alias, ""):
+                division = value
+                break
+    return f"{localized_name} {division}".strip()
 
 
 def _font_candidates(bold: bool) -> list[str]:
@@ -1121,7 +1178,8 @@ def _draw_chart_panel(
     title_right_limit = x + w - int(24 * scale)
 
     if single_summary:
-        rank_label = str(single_summary.get("latest_rank_label") or "暂无段位")
+        raw_rank_label = str(single_summary.get("latest_rank_label") or "暂无段位")
+        rank_label = _rank_label_zh(raw_rank_label)
         latest_score = int(single_summary.get("latest_rank_score") or 0)
         delta_value = int(
             single_summary.get("recent_event_delta_score")
@@ -1137,7 +1195,7 @@ def _draw_chart_panel(
         rank_icon_path = _resolve_rank_icon_path(
             icon_dir,
             str(single_summary.get("latest_rank_icon_file") or ""),
-            rank_label,
+            raw_rank_label,
             str(single_summary.get("rank_asset_file") or ""),
         )
         if rank_icon_path:
@@ -1186,15 +1244,13 @@ def _draw_chart_panel(
         )
         meta_text = (
             f"{rank_label}    {payload['range_label']}    "
-            f"横轴  {axis_label}    "
-            f"生成  {datetime.now(resolve_timezone(timezone_name)).strftime('%Y-%m-%d %H:%M')}"
+            f"横轴  {axis_label}"
         )
     else:
         meta_text = (
             f"时间范围  {payload['range_label']}    "
             f"精度  {payload['bucket_label']}    "
-            f"横轴  {axis_label}    "
-            f"生成时间  {datetime.now(resolve_timezone(timezone_name)).strftime('%Y-%m-%d %H:%M:%S')}"
+            f"横轴  {axis_label}"
         )
         title = _fit_text_to_width(
             draw,
@@ -1484,7 +1540,9 @@ def _draw_chart_panel(
                 label_font = fonts.small
                 label = _fit_text_to_width(
                     draw,
-                    str(change_point.get("rank_label") or "暂无段位"),
+                    _rank_label_zh(
+                        str(change_point.get("rank_label") or "暂无段位")
+                    ),
                     label_font,
                     max(62, int(120 * scale)),
                 )
@@ -1625,13 +1683,14 @@ def _draw_single_summary_dashboard(
     )
     draw.rectangle((x, y, x + max(4, int(5 * scale)), y + h), fill=ACCENT)
     pad = int(16 * scale)
-    rank_label = str(summary.get("latest_rank_label") or "暂无数据")
+    raw_rank_label = str(summary.get("latest_rank_label") or "暂无数据")
+    rank_label = _rank_label_zh(raw_rank_label)
     latest_score = int(summary.get("latest_rank_score") or 0)
     progress = _rank_progress(rank_label, latest_score)
     rank_icon_path = _resolve_rank_icon_path(
         icon_dir,
         str(summary.get("latest_rank_icon_file") or ""),
-        rank_label,
+        raw_rank_label,
         str(summary.get("rank_asset_file") or ""),
     )
     icon_size = max(64, int(78 * scale)) if rank_icon_path else 0
@@ -1898,11 +1957,12 @@ def _draw_summary_panel(
         display_name = str(summary.get("display_name") or "")
         score_text = f"{int(summary.get('latest_rank_score') or 0)} RP"
         score_w, _ = _text_size(draw, score_text, fonts.subheading)
-        rank_label = str(summary.get("latest_rank_label") or "暂无数据")
+        raw_rank_label = str(summary.get("latest_rank_label") or "暂无数据")
+        rank_label = _rank_label_zh(raw_rank_label)
         rank_icon_path = _resolve_rank_icon_path(
             icon_dir,
             str(summary.get("latest_rank_icon_file") or ""),
-            rank_label,
+            raw_rank_label,
             str(summary.get("rank_asset_file") or ""),
         )
         icon_size = max(36, int(44 * scale)) if rank_icon_path else 0
@@ -2231,7 +2291,8 @@ def _draw_event_panel(
         rank_text = _fit_text_to_width(
             draw,
             (
-                f"{event['from_rank_label'] or '无'} -> {event['to_rank_label']}"
+                f"{_rank_label_zh(event['from_rank_label'] or '无')} -> "
+                f"{_rank_label_zh(event['to_rank_label'])}"
                 if rank_changed
                 else "—"
             ),
@@ -2307,6 +2368,37 @@ def _normalize_layout(layout: str) -> str:
     return value
 
 
+def _draw_report_footer(
+    draw: ImageDraw.ImageDraw,
+    *,
+    width: int,
+    canvas_height: int,
+    footer_height: int,
+    timezone_name: str,
+    fonts: Fonts,
+    scale: float,
+) -> None:
+    footer_y = canvas_height - footer_height
+    draw.rectangle((0, footer_y, width, canvas_height), fill="#08131F")
+    draw.line((0, footer_y, width, footer_y), fill=PANEL_BORDER, width=1)
+    generated_at = datetime.now(resolve_timezone(timezone_name)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    footer_text = (
+        f"{REPORT_FOOTER_CREDIT}  ·  生成时间 {generated_at}"
+    )
+    text_w, text_h = _text_size(draw, footer_text, fonts.tiny)
+    draw.text(
+        (
+            max(int(24 * scale), (width - text_w) // 2),
+            footer_y + max(0, (footer_height - text_h) // 2 - 1),
+        ),
+        footer_text,
+        font=fonts.tiny,
+        fill=MUTED_SOFT,
+    )
+
+
 def render_dashboard_image_png(
     payload: dict,
     icon_dir: Path,
@@ -2335,6 +2427,7 @@ def render_dashboard_image_png(
 
     margin = int(36 * scale)
     gap = int(18 * scale)
+    footer_height = max(42, int(48 * scale))
     fonts = _build_fonts(scale)
 
     if layout == "full":
@@ -2343,7 +2436,16 @@ def render_dashboard_image_png(
         event_h = _measure_event_panel_height(len(payload.get("change_events", [])), scale, layout)
         canvas_height = min(
             _max_canvas_height(layout, len(payload.get("change_events", [])), scale),
-            max(height, margin * 2 + chart_h + gap + summary_h + gap + event_h),
+            max(
+                height,
+                margin * 2
+                + chart_h
+                + gap
+                + summary_h
+                + gap
+                + event_h
+                + footer_height,
+            ),
         )
         chart_rect = (margin, margin, width - margin * 2, chart_h)
         summary_rect = (margin, margin + chart_h + gap, width - margin * 2, summary_h)
@@ -2351,11 +2453,17 @@ def render_dashboard_image_png(
             margin,
             summary_rect[1] + summary_rect[3] + gap,
             width - margin * 2,
-            min(event_h, canvas_height - (summary_rect[1] + summary_rect[3] + gap) - margin),
+            min(
+                event_h,
+                canvas_height
+                - (summary_rect[1] + summary_rect[3] + gap)
+                - margin
+                - footer_height,
+            ),
         )
     else:
         chart_h = int(height * 0.52)
-        bottom_h = height - margin * 2 - gap - chart_h
+        bottom_h = height - margin * 2 - gap - chart_h - footer_height
         summary_w = int((width - margin * 2 - gap) * 0.60)
         events_w = width - margin * 2 - gap - summary_w
         canvas_height = height
@@ -2387,6 +2495,15 @@ def render_dashboard_image_png(
     )
     _draw_summary_panel(image, draw, summary_rect, payload, icon_dir, fonts, scale, layout)
     _draw_event_panel(image, draw, event_rect, payload, icon_dir, fonts, scale, layout)
+    _draw_report_footer(
+        draw,
+        width=width,
+        canvas_height=canvas_height,
+        footer_height=footer_height,
+        timezone_name=timezone_name,
+        fonts=fonts,
+        scale=scale,
+    )
 
     buffer = BytesIO()
     image.convert("RGB").save(buffer, format="PNG", optimize=True)

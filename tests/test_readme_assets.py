@@ -34,11 +34,24 @@ def test_readme_images_use_remote_repository_urls_for_astrbot_dashboard():
     image_urls = IMAGE_LINK_RE.findall(content)
 
     assert image_urls
-    assert [
-        url
-        for url in image_urls
-        if "moeneri/astrbot_plugin_apexrankwatch" not in url
-    ] == []
+    assert all("moeneri/" in url for url in image_urls)
+
+
+def test_readme_score_change_image_uses_external_immutable_asset_url():
+    root = Path(__file__).resolve().parents[1]
+    content = (root / "README.md").read_text(encoding="utf-8")
+    image_urls = IMAGE_LINK_RE.findall(content)
+    score_urls = [
+        url for url in image_urls if "score_change_chart_example" in url
+    ]
+
+    assert score_urls == [
+        "https://cdn.jsdelivr.net/gh/moeneri/apexrankwatch-assets"
+        "@97ad4c42346afa85333036192b56352540d7b053/"
+        "images/score_change_chart_example_2.4.7.png"
+    ]
+    assert "astrbot_plugin_apexrankwatch" not in score_urls[0]
+    assert not (root / "assets" / "readme" / "score_change_chart_example.png").exists()
 
 
 def test_readme_overview_image_uses_immutable_cache_safe_url():
@@ -74,7 +87,7 @@ def test_metadata_version_is_patch_release():
     metadata_path = Path(__file__).resolve().parents[1] / "metadata.yaml"
     metadata = metadata_path.read_text(encoding="utf-8")
 
-    assert "version: 2.4.6" in metadata
+    assert "version: 2.4.7" in metadata
 
 
 def test_season_remaining_time_is_documented_in_readme_and_metadata():
