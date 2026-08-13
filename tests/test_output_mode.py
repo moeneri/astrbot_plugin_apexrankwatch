@@ -2681,6 +2681,54 @@ def test_season_image_cache_prunes_stale_missing_and_excess_entries(
     )
 
 
+@pytest.mark.parametrize(
+    ("setter_name", "cache_attr", "ttl_attr", "max_entries_attr"),
+    [
+        (
+            "_set_cached_map_rotation_image",
+            "_map_rotation_image_cache",
+            "_MAP_IMAGE_CACHE_TTL_SECONDS",
+            "_MAP_IMAGE_CACHE_MAX_ENTRIES",
+        ),
+        (
+            "_set_cached_predator_info_image",
+            "_predator_info_image_cache",
+            "_PREDATOR_IMAGE_CACHE_TTL_SECONDS",
+            "_PREDATOR_IMAGE_CACHE_MAX_ENTRIES",
+        ),
+    ],
+)
+def test_image_caches_prune_stale_missing_and_excess_entries(
+    monkeypatch,
+    tmp_path,
+    setter_name,
+    cache_attr,
+    ttl_attr,
+    max_entries_attr,
+):
+    main_module = _load_main_module()
+    main = object.__new__(main_module.Main)
+    setattr(main, cache_attr, {})
+    cached_image = tmp_path / "cached.png"
+    cached_image.write_bytes(b"cached")
+    clock = iter(float(second) for second in range(100))
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: next(clock))
+    setter = getattr(main, setter_name)
+
+    for index in range(100):
+        image_path = cached_image if index != 50 else tmp_path / "missing.png"
+        setter(("entry", index), image_path)
+
+    cache = getattr(main, cache_attr)
+    assert len(cache) <= getattr(main, max_entries_attr)
+    assert ("entry", 99) in cache
+    assert all(path.exists() for _saved_at, path in cache.values())
+    assert all(
+        99 - saved_at <= getattr(main, ttl_attr)
+        for saved_at, _path in cache.values()
+    )
+
+
 def _record_season_card_shadow_text(main):
     records = []
     original_draw_text = main._draw_text_with_shadow

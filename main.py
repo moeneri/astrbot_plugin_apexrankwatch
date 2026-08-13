@@ -208,6 +208,7 @@ class Main(Star):
     _MAP_CARD_SIZE = (900, 320)
     _MAP_CURRENT_HEIGHT = 212
     _MAP_IMAGE_CACHE_TTL_SECONDS = 60
+    _MAP_IMAGE_CACHE_MAX_ENTRIES = 32
     _SEASON_CARD_SIZE = (840, 360)
     _SEASON_CARD_RENDERER_VERSION = 4
     _SEASON_IMAGE_CACHE_TTL_SECONDS = 60
@@ -222,6 +223,7 @@ class Main(Star):
     _SCORE_CHANGE_MAX_LIMIT = SCORE_HISTORY_LIMIT
     _SCORE_CHANGE_CHART_WIDTH = 1920
     _PREDATOR_IMAGE_CACHE_TTL_SECONDS = 60
+    _PREDATOR_IMAGE_CACHE_MAX_ENTRIES = 16
     _PREDATOR_GREEN = (88, 210, 126, 255)
     _PREDATOR_DEEP_RED = (158, 31, 36, 255)
     _PREDATOR_NEUTRAL = (246, 241, 232, 255)
@@ -5923,20 +5925,37 @@ class Main(Star):
         return image_path
 
     def _set_cached_season_info_image(self, cache_key: tuple, image_path: Path) -> None:
-        cache = getattr(self, "_season_info_image_cache", None)
+        self._set_bounded_image_cache_entry(
+            cache_attr="_season_info_image_cache",
+            cache_key=cache_key,
+            image_path=image_path,
+            ttl_seconds=self._SEASON_IMAGE_CACHE_TTL_SECONDS,
+            max_entries=self._SEASON_IMAGE_CACHE_MAX_ENTRIES,
+        )
+
+    def _set_bounded_image_cache_entry(
+        self,
+        *,
+        cache_attr: str,
+        cache_key: tuple,
+        image_path: Path,
+        ttl_seconds: float,
+        max_entries: int,
+    ) -> None:
+        cache = getattr(self, cache_attr, None)
         if not isinstance(cache, dict):
             cache = {}
-            self._season_info_image_cache = cache
+            setattr(self, cache_attr, cache)
         saved_at = time.monotonic()
         for existing_key, (existing_saved_at, existing_path) in list(cache.items()):
             if (
-                saved_at - existing_saved_at > self._SEASON_IMAGE_CACHE_TTL_SECONDS
+                saved_at - existing_saved_at > ttl_seconds
                 or not Path(existing_path).exists()
             ):
                 cache.pop(existing_key, None)
 
         cache[cache_key] = (saved_at, Path(image_path))
-        excess = len(cache) - self._SEASON_IMAGE_CACHE_MAX_ENTRIES
+        excess = len(cache) - max_entries
         if excess <= 0:
             return
         oldest_keys = sorted(
@@ -7060,11 +7079,13 @@ class Main(Star):
         return image_path
 
     def _set_cached_map_rotation_image(self, cache_key: tuple, image_path: Path) -> None:
-        cache = getattr(self, "_map_rotation_image_cache", None)
-        if not isinstance(cache, dict):
-            cache = {}
-            self._map_rotation_image_cache = cache
-        cache[cache_key] = (time.monotonic(), Path(image_path))
+        self._set_bounded_image_cache_entry(
+            cache_attr="_map_rotation_image_cache",
+            cache_key=cache_key,
+            image_path=image_path,
+            ttl_seconds=self._MAP_IMAGE_CACHE_TTL_SECONDS,
+            max_entries=self._MAP_IMAGE_CACHE_MAX_ENTRIES,
+        )
 
     def _map_rotation_image_cache_key(
         self,
@@ -7739,11 +7760,13 @@ class Main(Star):
     def _set_cached_predator_info_image(
         self, cache_key: tuple, image_path: Path
     ) -> None:
-        cache = getattr(self, "_predator_info_image_cache", None)
-        if not isinstance(cache, dict):
-            cache = {}
-            self._predator_info_image_cache = cache
-        cache[cache_key] = (time.monotonic(), Path(image_path))
+        self._set_bounded_image_cache_entry(
+            cache_attr="_predator_info_image_cache",
+            cache_key=cache_key,
+            image_path=image_path,
+            ttl_seconds=self._PREDATOR_IMAGE_CACHE_TTL_SECONDS,
+            max_entries=self._PREDATOR_IMAGE_CACHE_MAX_ENTRIES,
+        )
 
     def _predator_info_image_cache_key(
         self, output_dir: Path, predator_info: PredatorInfo, selected_platform: str = ""
