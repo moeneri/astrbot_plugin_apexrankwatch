@@ -128,6 +128,7 @@ class PluginConfig:
     alias_enabled: bool
     player_aliases: str
     alias_admin_only: bool
+    season_probe_player: str
 
     @staticmethod
     def from_raw(raw) -> "PluginConfig":
@@ -136,6 +137,7 @@ class PluginConfig:
             output_mode = "image"
         return PluginConfig(
             api_key=str(raw.get("api_key", "")).strip(),
+            season_probe_player=str(raw.get("season_probe_player", "")).strip(),
             debug_logging=coerce_bool(raw.get("debug_logging", False), False),
             check_interval=max(1, coerce_int(raw.get("check_interval", 2), 2)),
             timeout_ms=max(1000, coerce_int(raw.get("timeout_ms", 10000), 10000)),
@@ -346,6 +348,7 @@ class Main(Star):
             timeout_ms=self._config.timeout_ms,
             max_retries=self._config.max_retries,
             logger=logger,
+            season_probe_player=self._config.season_probe_player,
         )
 
         self._stop_event = asyncio.Event()
@@ -920,8 +923,13 @@ class Main(Star):
             value = int(token)
             if value <= 0:
                 raise ValueError("赛季号必须大于 0")
-            return value
-        raise ValueError("请输入正确的赛季号，例如 /apexseason 28 或 /apexseason current")
+            # 数据源只暴露「当前分段」，没有按赛季号回溯的接口。与其静默返回
+            # 当前分段的数据（等于答错），不如直接说清楚。
+            raise ValueError(
+                f"历史赛季查询已不支持：数据源只提供当前排位分段，无法查询 S{value}。"
+                "直接发送 /新赛季 查看当前分段。"
+            )
+        raise ValueError("请输入正确的参数，例如 /apexseason 或 /apexseason current")
 
     def _is_season_keyword_disabled(self, group_id: str) -> bool:
         if not group_id:
@@ -1914,7 +1922,7 @@ class Main(Star):
 
     @filter.command("apexseason")
     async def apexseason(self, event: AstrMessageEvent, season: str = ""):
-        """查询当前或指定 Apex 赛季结束时间。"""
+        """查询当前 Apex 排位分段（上/下半赛季）的结束时间和剩余时间。"""
         deny = self._guard_access(event)
         if deny:
             yield self._plain(event, "\n".join([self._time_line(), deny]))
@@ -1931,11 +1939,15 @@ class Main(Star):
 
         try:
             season_info = await self._api.fetch_season_info(season_number)
+        except ApexApiError as exc:
+            # 分段数据现在只有 API 一个来源，没有任何回退，因此必须把具体原因
+            # （缺 Key / 限流 / 未验证）透出去，而不是笼统报“查询失败”。
+            logger.error(f"排位分段查询失败: {exc}")
+            yield self._plain(event, self._api_request_failed_text("排位分段查询", exc))
+            return
         except Exception as exc:
-            logger.error(f"赛季时间查询失败: {exc}")
-            yield self._plain(event, 
-                "\n".join([self._time_line(), "❌ 查询失败：无法获取赛季时间"])
-            )
+            logger.error(f"排位分段查询失败: {exc}")
+            yield self._plain(event, self._api_request_failed_text("排位分段查询"))
             return
 
         if self._is_text_output_mode():
@@ -2854,13 +2866,13 @@ class Main(Star):
 
     @filter.command("apex赛季")
     async def apexseason_cn(self, event: AstrMessageEvent, season: str = ""):
-        """中文别名：查询当前或指定 Apex 赛季结束时间。"""
+        """中文别名：查询当前 Apex 排位分段的结束时间和剩余时间。"""
         async for result in self.apexseason(event, season):
             yield result
 
     @filter.command("新赛季")
     async def apexseason_new_cn(self, event: AstrMessageEvent, season: str = ""):
-        """中文别名：查询当前或指定 Apex 赛季结束时间。"""
+        """中文别名：查询当前 Apex 排位分段的结束时间和剩余时间。"""
         async for result in self.apexseason(event, season):
             yield result
 
@@ -3219,12 +3231,11 @@ class Main(Star):
             "➖ /apexrankremove <玩家|uid:...> [平台]  别名：/apex移除 /取消持续视奸",
             "——",
             "【信息】",
-            "🗓️ /apexseason [赛季号]  别名：/apex赛季 /新赛季",
+            "🗓️ /apexseason  别名：/apex赛季 /新赛季（当前排位分段）",
             "🗺️ /map  别名：/地图 /排位地图 /apexmap /apexrankmap（排位地图轮换）",
             "🕘 /全天地图（API 学习确认排位未来 24 小时地图）",
             "🌍 /匹配地图（三人赛地图轮换）",
             "🏆 /apexpredator [平台]  别名：/apex猎杀 /猎杀",
-            "例：/apexseason 28  或  /apexseason current",
             "关键词：消息包含「赛季」自动回复（/赛季关闭，/赛季开启）",
             "——",
             "【管理】",
@@ -3318,7 +3329,7 @@ class Main(Star):
                     ("🕘 /全天地图", "API 学习确认排位未来 24 小时地图"),
                     ("🌍 /匹配地图", "三人赛地图轮换"),
                     ("🏆 /apexpredator [平台] /apex猎杀 /猎杀", "大师数量与猎杀底分"),
-                    ("🗓️ /apexseason /新赛季", "当前赛季结束时间"),
+                    ("🗓️ /apexseason /新赛季", "当前排位分段结束时间"),
                     ("🔁 赛季关键词", "群消息包含赛季时自动回复"),
                 ],
             ),
@@ -5978,35 +5989,23 @@ class Main(Star):
         else:
             effective_now = effective_now.astimezone(timezone.utc)
         minute_bucket = effective_now.replace(second=0, microsecond=0).isoformat()
-        split_fingerprints = tuple(
-            (
-                getattr(split_info, "start_iso", ""),
-                getattr(split_info, "end_iso", ""),
-                getattr(split_info, "source", ""),
-                getattr(split_info, "exact", None),
-                getattr(split_info, "note", ""),
-            )
-            for split_info in (getattr(season_info, "splits", None) or [])
-        )
         return (
             str(output_dir.resolve()),
             self._SEASON_CARD_RENDERER_VERSION,
             minute_bucket,
             season_info.season_number,
-            season_info.season_name,
+            getattr(season_info, "split_index", None),
+            getattr(season_info, "ranked_season_id", ""),
             season_info.start_iso,
             season_info.end_iso,
             getattr(season_info, "start_date", ""),
             getattr(season_info, "end_date", ""),
             getattr(season_info, "status_text", ""),
             getattr(season_info, "source", ""),
-            getattr(season_info, "split_source", ""),
             getattr(season_info, "split_note", ""),
             getattr(season_info, "current_split_label", ""),
-            getattr(season_info, "current_split_index", None),
             getattr(season_info, "next_transition_label", ""),
             getattr(season_info, "next_transition_iso", ""),
-            split_fingerprints,
         )
 
     def _season_card_output_dir(self) -> Path:
@@ -6065,10 +6064,6 @@ class Main(Star):
             or "未知"
         )
         progress = self._season_progress_fraction(season_info, now=effective_now)
-        split_fraction = self._season_split_fraction(season_info)
-        split_remaining = self._format_split_remaining(
-            season_info, now=effective_now
-        )
         season_end_remaining = self._format_season_end_remaining(
             season_info, now=effective_now
         )
@@ -6097,7 +6092,7 @@ class Main(Star):
         self._draw_text_with_shadow(
             draw,
             (132, 52),
-            "当前赛季",
+            "当前分段",
             header_font,
             fill=(236, 239, 244, 255),
         )
@@ -6212,66 +6207,6 @@ class Main(Star):
             apex_amber,
         )
 
-        split_x = None
-        if split_fraction is not None:
-            split_x = bar_x + round(bar_w * split_fraction)
-            divider_top, divider_bottom = 240, 281
-            divider_glow = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-            glow_draw = ImageDraw.Draw(divider_glow)
-            glow_draw.rounded_rectangle(
-                (
-                    split_x - 7,
-                    divider_top - 3,
-                    split_x + 7,
-                    divider_bottom + 3,
-                ),
-                radius=7,
-                fill=(69, 230, 139, 48),
-            )
-            canvas.alpha_composite(divider_glow)
-            draw.rounded_rectangle(
-                (split_x - 3, divider_top, split_x + 3, divider_bottom),
-                radius=3,
-                fill=(83, 225, 133, 255),
-            )
-
-            if split_remaining:
-                countdown_font = self._fit_font(
-                    draw, split_remaining, 13, 11, 180, bold=True
-                )
-                countdown_box = draw.textbbox((0, 0), split_remaining, font=countdown_font)
-                countdown_width = countdown_box[2] - countdown_box[0] + 22
-                pill_left = min(
-                    max(split_x - countdown_width / 2, 24),
-                    width - 24 - countdown_width,
-                )
-                pill = (
-                    pill_left,
-                    220,
-                    pill_left + countdown_width,
-                    240,
-                )
-                draw.rounded_rectangle(
-                    pill,
-                    radius=10,
-                    fill=(22, 74, 50, 246),
-                    outline=(83, 225, 133, 220),
-                    width=1,
-                )
-                countdown_x = self._centered_text_x(
-                    draw, split_remaining, countdown_font, pill[0], pill[2]
-                )
-                countdown_y = self._centered_text_y(
-                    draw, split_remaining, countdown_font, pill[1], pill[3]
-                )
-                self._draw_text_with_shadow(
-                    draw,
-                    (countdown_x, countdown_y),
-                    split_remaining,
-                    countdown_font,
-                    fill=(176, 255, 204, 255),
-                )
-
         timeline_label_font = self._font(17, bold=True)
         start_time_font = self._fit_font(
             draw, start_weekday_time, 16, 15, 170, bold=False
@@ -6282,7 +6217,7 @@ class Main(Star):
         self._draw_text_with_shadow(
             draw,
             (48, 275),
-            "赛季开始",
+            "分段开始",
             timeline_label_font,
             fill=(220, 224, 232, 245),
         )
@@ -6294,7 +6229,7 @@ class Main(Star):
             fill=(191, 198, 209, 235),
         )
 
-        end_label_text = "赛季结束"
+        end_label_text = "分段结束"
         end_label_width = draw.textbbox(
             (0, 0), end_label_text, font=timeline_label_font
         )[2]
@@ -6315,31 +6250,6 @@ class Main(Star):
             end_time_font,
             fill=(191, 198, 209, 235),
         )
-
-        if split_x is not None:
-            split_time = self._to_beijing_time_with_weekday(
-                getattr(season_info.splits[0], "end_iso", "")
-            )
-            if split_time:
-                split_time_font = self._fit_font(
-                    draw, split_time, 16, 15, 190, bold=False
-                )
-                split_time_box = draw.textbbox(
-                    (0, 0), split_time, font=split_time_font
-                )
-                split_time_width = split_time_box[2] - split_time_box[0]
-                split_time_left = min(
-                    max(split_x - split_time_width / 2, 220),
-                    620 - split_time_width,
-                )
-                split_time_x = split_time_left - split_time_box[0]
-                self._draw_text_with_shadow(
-                    draw,
-                    (split_time_x, 299),
-                    split_time,
-                    split_time_font,
-                    fill=(176, 235, 197, 245),
-                )
 
         disclaimer_lines, disclaimer_font = self._season_card_disclaimer_lines(
             draw,
@@ -6363,7 +6273,7 @@ class Main(Star):
 
     @staticmethod
     def _season_end_label() -> str:
-        return "赛季结束时间"
+        return "分段结束时间"
 
     @staticmethod
     def _season_source_label(source: str) -> str:
@@ -6381,22 +6291,11 @@ class Main(Star):
         *,
         max_width: int,
     ) -> tuple[tuple[str, ...], object | None]:
-        split_source = str(getattr(season_info, "split_source", "") or "").strip()
-        if split_source == "推导":
-            text = (
-                "下半赛季分界按赛季中点后首个北京时间周三 01:00 推测，"
-                "可能不完全准确，仅供参考。"
-            )
-        else:
-            text = str(getattr(season_info, "split_note", "") or "").strip()
-        if not text:
+        split_note = str(getattr(season_info, "split_note", "") or "").strip()
+        if not split_note:
             return (), None
-        if split_source == "推导":
-            # 推导说明是产品固定文案：允许继续缩小字号，但不能截断或追加省略号。
-            font = self._fit_font(draw, text, 15, 1, max_width, bold=False)
-            return (text,), font
-        font = self._fit_font(draw, text, 15, 8, max_width, bold=False)
-        fitted_text = self._fit_text_to_width(draw, text, font, max_width)
+        font = self._fit_font(draw, split_note, 15, 8, max_width, bold=False)
+        fitted_text = self._fit_text_to_width(draw, split_note, font, max_width)
         return (fitted_text,), font
 
     @staticmethod
@@ -6470,11 +6369,11 @@ class Main(Star):
         return badge
 
     def _season_card_label(self, season_info: SeasonInfo) -> str:
-        if season_info.season_number is not None and season_info.season_name:
-            return f"S{season_info.season_number} · {season_info.season_name}"
+        # 赛季代号（如 Marked）来自已下线的第三方站点，现在只有赛季号可用。
+        stage = str(getattr(season_info, "current_split_label", "") or "").strip()
         if season_info.season_number is not None:
-            return f"S{season_info.season_number}"
-        return season_info.season_name or "未知赛季"
+            return f"S{season_info.season_number} · {stage}" if stage else f"S{season_info.season_number}"
+        return stage or "未知赛季"
 
     @staticmethod
     def _parse_card_datetime(value: str) -> datetime | None:
@@ -6490,13 +6389,6 @@ class Main(Star):
             return parsed.astimezone(timezone.utc)
         except Exception:
             return None
-
-    @staticmethod
-    def _season_split_boundary(season_info: SeasonInfo) -> datetime | None:
-        splits = getattr(season_info, "splits", None)
-        if not splits or len(splits) < 2:
-            return None
-        return Main._parse_card_datetime(getattr(splits[0], "end_iso", ""))
 
     @staticmethod
     def _season_progress_fraction(
@@ -6518,47 +6410,10 @@ class Main(Star):
         return min(1.0, max(0.0, elapsed / total))
 
     @staticmethod
-    def _season_split_fraction(season_info: SeasonInfo) -> float | None:
-        start_dt = Main._parse_card_datetime(getattr(season_info, "start_iso", ""))
-        end_dt = Main._parse_card_datetime(getattr(season_info, "end_iso", ""))
-        boundary = Main._season_split_boundary(season_info)
-        if start_dt is None or end_dt is None or boundary is None:
-            return None
-        total = (end_dt - start_dt).total_seconds()
-        if total <= 0:
-            return None
-        fraction = (boundary - start_dt).total_seconds() / total
-        return fraction if 0.0 < fraction < 1.0 else None
-
-    @staticmethod
-    def _format_split_remaining(
-        season_info: SeasonInfo, now: datetime | None = None
-    ) -> str:
-        start_dt = Main._parse_card_datetime(getattr(season_info, "start_iso", ""))
-        end_dt = Main._parse_card_datetime(getattr(season_info, "end_iso", ""))
-        boundary = Main._season_split_boundary(season_info)
-        if start_dt is None or end_dt is None or boundary is None:
-            return ""
-        current = now or datetime.now(timezone.utc)
-        if current.tzinfo is None:
-            current = current.replace(tzinfo=timezone.utc)
-        else:
-            current = current.astimezone(timezone.utc)
-        if not start_dt <= current < boundary < end_dt:
-            return ""
-        total_seconds = int((boundary - current).total_seconds())
-        days = total_seconds // 86400
-        hours = (total_seconds % 86400) // 3600
-        if days or hours:
-            return f"距下半赛季 {days}天 {hours}小时"
-        minutes = max(1, total_seconds // 60)
-        return f"距下半赛季 {minutes}分钟"
-
-    @staticmethod
     def _format_season_end_remaining(
         season_info: SeasonInfo, now: datetime | None = None
     ) -> str:
-        """Format the image-only full-season countdown without changing text output."""
+        """分段剩余时间倒计时（仅图片卡片使用）。"""
         try:
             start_dt = Main._parse_card_datetime(
                 getattr(season_info, "start_iso", "")
@@ -6578,14 +6433,14 @@ class Main(Star):
             if current < start_dt:
                 return ""
             if current >= end_dt:
-                return "赛季已结束"
+                return "分段已结束"
 
             total_seconds = int((end_dt - current).total_seconds())
             if total_seconds < 3600:
-                return "距赛季结束 不足1小时"
+                return "距分段结束 不足1小时"
             days = total_seconds // 86400
             hours = (total_seconds % 86400) // 3600
-            return f"距赛季结束 {days}天 {hours}小时"
+            return f"距分段结束 {days}天 {hours}小时"
         except Exception:
             return ""
 
@@ -8020,31 +7875,34 @@ class Main(Star):
             return str(value)
 
     def _format_season_info(self, season_info: SeasonInfo) -> str:
+        # 只展示“当前分段”：ALS 是唯一数据源，它不提供整赛季起止。
+        stage = str(getattr(season_info, "current_split_label", "") or "").strip()
         season_label = "未知"
         if season_info.season_number is not None:
-            if season_info.season_name:
-                season_label = f"S{season_info.season_number} · {season_info.season_name}"
-            else:
-                season_label = f"S{season_info.season_number}"
+            season_label = f"S{season_info.season_number}"
+            if stage:
+                season_label = f"{season_label} · {stage}"
+        elif stage:
+            season_label = stage
 
         lines = [
             self._time_line(),
-            "🗓️ Apex 赛季时间信息",
-            f"📌 查询赛季: {season_label}",
+            "🗓️ Apex 排位分段时间",
+            f"📌 当前分段: {season_label}",
         ]
         if season_info.status_text and season_info.status_text != "未知":
-            lines.append(f"📍 赛季状态: {season_info.status_text}")
+            lines.append(f"📍 分段状态: {season_info.status_text}")
 
         start_bj = self._to_beijing_time(season_info.start_iso)
         end_bj = self._to_beijing_time(season_info.end_iso)
         if start_bj:
-            lines.append(f"🟢 开始时间(北京时间): {start_bj}")
+            lines.append(f"🟢 分段开始(北京时间): {start_bj}")
         if end_bj:
-            lines.append(f"🔴 结束时间(北京时间): {end_bj}")
+            lines.append(f"🔴 分段结束(北京时间): {end_bj}")
         if not start_bj and season_info.start_date and season_info.start_date != "未知":
-            lines.append(f"🟢 开始时间: {season_info.start_date}")
+            lines.append(f"🟢 分段开始: {season_info.start_date}")
         if not end_bj and season_info.end_date and season_info.end_date != "未知":
-            lines.append(f"🔴 结束时间: {season_info.end_date}")
+            lines.append(f"🔴 分段结束: {season_info.end_date}")
 
         remaining = self._format_remaining(season_info.end_iso)
         if remaining:
@@ -8052,49 +7910,13 @@ class Main(Star):
 
         progress = self._format_progress(season_info.start_iso, season_info.end_iso)
         if progress:
-            lines.append(f"📈 赛季进度: {progress}")
+            lines.append(f"📈 分段进度: {progress}")
 
-        if season_info.supports_ranked_splits and season_info.splits:
-            has_inexact_split = any(
-                not getattr(split, "exact", True) for split in season_info.splits
-            )
-            if season_info.current_split_label:
-                lines.append(f"🧩 当前阶段: {season_info.current_split_label}")
-            if season_info.next_transition_label and season_info.next_transition_iso:
-                transition_bj = self._to_beijing_time(season_info.next_transition_iso)
-                if transition_bj:
-                    lines.append(
-                        f"🔄 {season_info.next_transition_label}(北京时间): {transition_bj}"
-                    )
-                transition_remaining = self._format_remaining(season_info.next_transition_iso)
-                if transition_remaining:
-                    lines.append(f"⏱️ 阶段剩余: {transition_remaining}")
-            for split in season_info.splits:
-                split_start = self._to_beijing_time(split.start_iso) or split.start_date
-                split_end = self._to_beijing_time(split.end_iso) or split.end_date
-                lines.append(
-                    f"{split.index}️⃣ {split.stage_name}: {split_start} ~ {split_end}"
-                )
-            if has_inexact_split:
-                if season_info.split_source == "推导":
-                    lines.append(
-                        "⚠️ 下半赛季分界按完整赛季中点后首个北京时间周三 01:00 推测，可能不完全准确，仅供参考。"
-                    )
-                elif season_info.split_note:
-                    lines.append(f"⚠️ Split 时间说明: {season_info.split_note}")
-            if season_info.split_source:
-                split_meta = season_info.split_source
-                if season_info.split_note and not has_inexact_split:
-                    split_meta = f"{split_meta}（{season_info.split_note}）"
-                lines.append(f"🧠 Split 数据: {split_meta}")
-        elif season_info.split_note:
-            lines.append(f"🧩 排位阶段: {season_info.split_note}")
+        if season_info.split_note:
+            lines.append(f"🧩 {season_info.split_note}")
 
         lines.append(f"ℹ️ 数据来源: {season_info.source}")
-        if str(season_info.source or "").strip().lower() == "ea.com":
-            lines.append("ℹ️ 赛季时间以游戏内实际显示为准")
-        else:
-            lines.append("⚠️ 第三方来源仅供参考")
+        lines.append("ℹ️ 排位重置时间为北京时间周三 01:00（00:30 关闭排位）")
         return "\n".join(lines)
 
     @staticmethod

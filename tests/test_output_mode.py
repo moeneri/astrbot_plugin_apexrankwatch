@@ -109,53 +109,21 @@ def _plugin_config(main_module, **overrides):
 
 
 def _season_29(main_module):
-    split_note = (
-        "下半赛季分界按完整赛季中点后首个北京时间周三 01:00 推测，可能不完全准确。"
-    )
+    """S29 下半赛季的分段信息（新模型下 start/end 即分段窗口）。"""
     return main_module.SeasonInfo(
         season_number=29,
-        season_name="Season 29",
-        start_date="2026-05-06",
-        end_date="2026-08-05",
-        timezone="Asia/Shanghai",
-        update_time_hint="",
-        source="test",
-        season_url="",
+        split_index=2,
+        ranked_season_id="br_ranked_s29_s2",
         start_iso="2026-05-05T17:00:00Z",
         end_iso="2026-08-04T17:00:00Z",
+        start_date="2026-05-06 01:00 北京时间",
+        end_date="2026-08-05 01:00 北京时间",
+        source="api.mozambiquehe.re",
+        status_text="进行中",
         current_split_label="下半赛季",
-        current_split_index=2,
-        next_transition_label="赛季结束",
+        next_transition_label="下半赛季结束",
         next_transition_iso="2026-08-04T17:00:00Z",
-        split_source="推导",
-        split_note=split_note,
-        supports_ranked_splits=True,
-        splits=[
-            types.SimpleNamespace(
-                index=1,
-                label="Split 1",
-                stage_name="上半赛季",
-                start_iso="2026-05-05T17:00:00Z",
-                end_iso="2026-06-23T17:00:00Z",
-                start_date="2026-05-06 01:00 北京时间",
-                end_date="2026-06-24 01:00 北京时间",
-                source="推导",
-                exact=False,
-                note=split_note,
-            ),
-            types.SimpleNamespace(
-                index=2,
-                label="Split 2",
-                stage_name="下半赛季",
-                start_iso="2026-06-23T17:00:00Z",
-                end_iso="2026-08-04T17:00:00Z",
-                start_date="2026-06-24 01:00 北京时间",
-                end_date="2026-08-05 01:00 北京时间",
-                source="推导",
-                exact=False,
-                note=split_note,
-            ),
-        ],
+        split_note="分段时间来自游戏内排位数据，精确到分钟。",
     )
 
 
@@ -2271,7 +2239,7 @@ def test_season_end_remaining_formats_days_and_hours_with_injected_now():
         now=datetime(2026, 7, 22, 12, tzinfo=timezone.utc),
     )
 
-    assert remaining == "距赛季结束 13天 5小时"
+    assert remaining == "距分段结束 13天 5小时"
 
 
 def test_season_end_remaining_keeps_zero_days_when_less_than_one_day():
@@ -2283,7 +2251,7 @@ def test_season_end_remaining_keeps_zero_days_when_less_than_one_day():
         now=datetime(2026, 8, 4, 12, 30, tzinfo=timezone.utc),
     )
 
-    assert remaining == "距赛季结束 0天 4小时"
+    assert remaining == "距分段结束 0天 4小时"
 
 
 def test_season_end_remaining_uses_short_text_under_one_hour():
@@ -2295,14 +2263,14 @@ def test_season_end_remaining_uses_short_text_under_one_hour():
         now=datetime(2026, 8, 4, 16, 31, tzinfo=timezone.utc),
     )
 
-    assert remaining == "距赛季结束 不足1小时"
+    assert remaining == "距分段结束 不足1小时"
 
 
 @pytest.mark.parametrize(
     "now, expected",
     [
-        (datetime(2026, 8, 4, 18, tzinfo=timezone.utc), "赛季已结束"),
-        (datetime(2026, 8, 5, tzinfo=timezone.utc), "赛季已结束"),
+        (datetime(2026, 8, 4, 18, tzinfo=timezone.utc), "分段已结束"),
+        (datetime(2026, 8, 5, tzinfo=timezone.utc), "分段已结束"),
         (datetime(2026, 5, 5, 16, 59, 59, tzinfo=timezone.utc), ""),
     ],
 )
@@ -2352,23 +2320,14 @@ def test_season_card_uses_one_injected_now_for_progress_and_countdowns(monkeypat
         calls.append(("progress", now))
         return 0.5
 
-    def record_split_remaining(_season, now=None):
-        calls.append(("split", now))
-        return ""
-
     def record_season_remaining(_season, now=None):
         calls.append(("season", now))
-        return "距赛季结束 13天 6小时"
+        return "距分段结束 13天 6小时"
 
     monkeypatch.setattr(
         main_module.Main,
         "_season_progress_fraction",
         staticmethod(record_progress),
-    )
-    monkeypatch.setattr(
-        main_module.Main,
-        "_format_split_remaining",
-        staticmethod(record_split_remaining),
     )
     monkeypatch.setattr(
         main_module.Main,
@@ -2378,8 +2337,8 @@ def test_season_card_uses_one_injected_now_for_progress_and_countdowns(monkeypat
 
     main._build_season_info_card(season, now=injected_now)
 
-    assert [kind for kind, _now in calls] == ["progress", "split", "season"]
-    assert [now for _kind, now in calls] == [injected_now] * 3
+    assert [kind for kind, _now in calls] == ["progress", "season"]
+    assert [now for _kind, now in calls] == [injected_now] * 2
 
 
 def test_season_text_uses_complete_range_and_single_prediction_warning():
@@ -2390,177 +2349,17 @@ def test_season_text_uses_complete_range_and_single_prediction_warning():
 
     output = plugin._format_season_info(season)
 
-    warning = (
-        "下半赛季分界按完整赛季中点后首个北京时间周三 01:00 "
-        "推测，可能不完全准确，仅供参考。"
-    )
     assert "2026-05-06 01:00" in output
     assert "2026-08-05 01:00" in output
-    assert "当前阶段: 下半赛季" in output
-    assert warning in output
-    assert output.count(warning) == 1
-    assert "Split 时间说明" not in output
-    assert "🧠 Split 数据: 推导" in output
-    assert "🧠 Split 数据: 推导（" not in output
-    assert "2026-09-23" not in output
-
-
-def test_season_text_marks_ea_fallback_as_official_source():
-    main_module = _load_main_module()
-    plugin = object.__new__(main_module.Main)
-    plugin._time_line = lambda: "现在"
-    season = _season_29(main_module)
-    season.source = "ea.com"
-
-    output = plugin._format_season_info(season)
-
-    assert "ℹ️ 数据来源: ea.com" in output
-    assert "ℹ️ 赛季时间以游戏内实际显示为准" in output
-    assert "⚠️ 第三方来源仅供参考" not in output
-
-
-def test_season_text_preserves_source_warning_for_inexact_public_split():
-    main_module = _load_main_module()
-    plugin = object.__new__(main_module.Main)
-    plugin._time_line = lambda: "现在"
-    season = _season_29(main_module)
-    note = (
-        "日期来自 Esports Tales；网站未提供精确时刻，"
-        "已按北京时间周三凌晨 1 点推导。"
-    )
-    season.split_source = "esportstales.com"
-    season.split_note = note
-    for split in season.splits:
-        split.note = note
-
-    output = plugin._format_season_info(season)
-
-    midpoint_warning = (
-        "下半赛季分界按完整赛季中点后首个北京时间周三 01:00 "
-        "推测，可能不完全准确，仅供参考。"
-    )
-    assert f"⚠️ Split 时间说明: {note}" in output
-    assert output.count(note) == 1
-    assert midpoint_warning not in output
-    assert "🧠 Split 数据: esportstales.com" in output
-    assert "🧠 Split 数据: esportstales.com（" not in output
-
-
-def test_season_text_treats_missing_exact_as_non_inferred():
-    main_module = _load_main_module()
-    plugin = object.__new__(main_module.Main)
-    plugin._time_line = lambda: "现在"
-    season = _season_29(main_module)
-    season.split_source = "官方 API"
-    season.split_note = "官方精确 Split 时间"
-    for split in season.splits:
-        del split.exact
-
-    output = plugin._format_season_info(season)
-
-    assert "⚠️ 下半赛季分界" not in output
-    assert "⚠️ Split 时间说明" not in output
-    assert "🧠 Split 数据: 官方 API（官方精确 Split 时间）" in output
-
-
-def test_split_fraction_uses_boundary_position_in_complete_season():
-    main_module = _load_main_module()
-    season = _season_29(main_module)
-
-    boundary = main_module.Main._season_split_boundary(season)
-    fraction = main_module.Main._season_split_fraction(season)
-
-    assert boundary == datetime(2026, 6, 23, 17, tzinfo=timezone.utc)
-    assert fraction == pytest.approx(0.538, abs=0.01)
-
-
-def test_split_countdown_formats_days_and_hours_and_expires():
-    main_module = _load_main_module()
-    season = _season_29(main_module)
-
-    assert main_module.Main._format_split_remaining(
-        season,
-        now=datetime(2026, 6, 11, 11, tzinfo=timezone.utc),
-    ) == "距下半赛季 12天 6小时"
-    assert (
-        main_module.Main._format_split_remaining(
-            season,
-            now=datetime(2026, 7, 10, 0, tzinfo=timezone.utc),
-        )
-        == ""
-    )
-
-
-def test_split_countdown_under_one_hour_shows_at_least_one_minute():
-    main_module = _load_main_module()
-    season = _season_29(main_module)
-
-    assert main_module.Main._format_split_remaining(
-        season,
-        now=datetime(2026, 6, 23, 16, 59, 30, tzinfo=timezone.utc),
-    ) == "距下半赛季 1分钟"
-
-
-def test_split_countdown_is_empty_before_season_start():
-    main_module = _load_main_module()
-    season = _season_29(main_module)
-
-    assert main_module.Main._format_split_remaining(
-        season,
-        now=datetime(2026, 5, 5, 16, 59, 59, tzinfo=timezone.utc),
-    ) == ""
-
-
-def test_split_countdown_is_valid_at_exact_season_start():
-    main_module = _load_main_module()
-    season = _season_29(main_module)
-
-    assert main_module.Main._format_split_remaining(
-        season,
-        now=datetime(2026, 5, 5, 18, tzinfo=timezone.utc),
-    ) == "距下半赛季 48天 23小时"
-
-
-def test_split_countdown_is_empty_at_exact_split_boundary():
-    main_module = _load_main_module()
-    season = _season_29(main_module)
-
-    assert main_module.Main._format_split_remaining(
-        season,
-        now=datetime(2026, 6, 23, 17, tzinfo=timezone.utc),
-    ) == ""
-
-
-def test_split_countdown_is_empty_after_season_end():
-    main_module = _load_main_module()
-    season = _season_29(main_module)
-
-    assert main_module.Main._format_split_remaining(
-        season,
-        now=datetime(2026, 8, 4, 18, 0, 1, tzinfo=timezone.utc),
-    ) == ""
-
-
-def test_split_countdown_is_empty_when_boundary_precedes_season_start():
-    main_module = _load_main_module()
-    season = _season_29(main_module)
-    season.splits[0].end_iso = "2026-05-05T17:00:00Z"
-
-    assert main_module.Main._format_split_remaining(
-        season,
-        now=datetime(2026, 5, 5, 16, tzinfo=timezone.utc),
-    ) == ""
-
-
-def test_split_countdown_is_empty_when_boundary_follows_season_end():
-    main_module = _load_main_module()
-    season = _season_29(main_module)
-    season.splits[0].end_iso = "2026-08-04T19:00:00Z"
-
-    assert main_module.Main._format_split_remaining(
-        season,
-        now=datetime(2026, 5, 5, 18, tzinfo=timezone.utc),
-    ) == ""
+    assert "当前分段: S29 · 下半赛季" in output
+    assert "分段状态: 进行中" in output
+    assert "数据来源: api.mozambiquehe.re" in output
+    # 国服口径的更新时间说明必须出现（见 b30150f）
+    assert "北京时间周三 01:00" in output
+    # 推测类文案已彻底移除
+    assert "推测" not in output
+    assert "推导" not in output
+    assert "第三方" not in output
 
 
 def test_beijing_time_with_weekday_formats_split_boundary():
@@ -2573,35 +2372,38 @@ def test_beijing_time_with_weekday_formats_split_boundary():
 
 
 def test_season_image_cache_key_fingerprints_all_rendered_state(tmp_path):
+    """SeasonInfo 的每一个字段都必须参与图片缓存 key。
+
+    这里按 dataclass 字段自动推导，而不是手写枚举：字段表变动时测试会自动
+    跟上，不会像上一版那样悄悄漏掉新增字段、或残留已删字段。
+    """
+    import dataclasses
+
     main_module = _load_main_module()
     main = object.__new__(main_module.Main)
     season = _season_29(main_module)
     now = datetime(2026, 7, 10, 12, 34, 5, tzinfo=timezone.utc)
     base_key = main._season_info_image_cache_key(tmp_path, season, now=now)
-    mutations = [
-        ("status", lambda item: setattr(item, "status_text", "进行中")),
-        ("source", lambda item: setattr(item, "source", "apexseasons.online")),
-        ("start display fallback", lambda item: setattr(item, "start_date", "新的开始日期")),
-        ("end display fallback", lambda item: setattr(item, "end_date", "新的结束日期")),
-        ("split source", lambda item: setattr(item, "split_source", "esportstales.com")),
-        ("split note", lambda item: setattr(item, "split_note", "来源日期仅精确到天")),
-        ("current phase label", lambda item: setattr(item, "current_split_label", "上半赛季")),
-        ("current phase index", lambda item: setattr(item, "current_split_index", 1)),
-        ("next transition label", lambda item: setattr(item, "next_transition_label", "下半赛季开始")),
-        ("next transition time", lambda item: setattr(item, "next_transition_iso", "2026-06-23T17:00:00Z")),
-        ("split start", lambda item: setattr(item.splits[0], "start_iso", "2026-05-05T19:00:00Z")),
-        ("split end", lambda item: setattr(item.splits[0], "end_iso", "2026-06-30T17:00:00Z")),
-        ("split item source", lambda item: setattr(item.splits[0], "source", "esportstales.com")),
-        ("split exactness", lambda item: setattr(item.splits[0], "exact", True)),
-        ("split item note", lambda item: setattr(item.splits[0], "note", "公开来源说明")),
-        ("second split fingerprint", lambda item: setattr(item.splits[1], "end_iso", "2026-08-04T19:00:00Z")),
-    ]
 
-    for label, mutate in mutations:
+    fields = dataclasses.fields(main_module.SeasonInfo)
+    assert fields, "SeasonInfo 应当是 dataclass"
+
+    for field in fields:
+        current = getattr(season, field.name)
+        # 造一个一定不同的新值
+        if isinstance(current, bool) or current is None:
+            mutated = 12345 if not isinstance(current, str) else "x"
+        elif isinstance(current, int):
+            mutated = current + 7
+        else:
+            mutated = f"{current}-changed"
+
         candidate = copy.deepcopy(season)
-        mutate(candidate)
+        setattr(candidate, field.name, mutated)
+        assert getattr(candidate, field.name) != current, field.name
+
         candidate_key = main._season_info_image_cache_key(tmp_path, candidate, now=now)
-        assert candidate_key != base_key, label
+        assert candidate_key != base_key, f"字段 {field.name} 未参与缓存 key"
 
 
 def test_season_image_cache_key_is_stable_within_minute_and_refreshes_next_minute(
@@ -2760,61 +2562,6 @@ def test_season_card_uses_compact_size_and_plugin_logo():
     assert logo_sizes == [84]
 
 
-def test_season_card_draws_short_green_divider_and_required_text(monkeypatch):
-    main_module = _load_main_module()
-    main = object.__new__(main_module.Main)
-    season = _season_29(main_module)
-    text_records = _record_season_card_shadow_text(main)
-    all_drawn_texts = []
-    original_draw_text = main_module.ImageDraw.ImageDraw.text
-
-    def record_all_text(draw, xy, text, *args, **kwargs):
-        all_drawn_texts.append(str(text))
-        return original_draw_text(draw, xy, text, *args, **kwargs)
-
-    monkeypatch.setattr(main_module.ImageDraw.ImageDraw, "text", record_all_text)
-
-    image = main._build_season_info_card(
-        season,
-        now=datetime(2026, 7, 10, 0, tzinfo=timezone.utc),
-    )
-
-    texts = [record[2] for record in text_records]
-    assert "赛季开始" in texts
-    assert any("赛季结束" in text for text in texts)
-    assert "2026-06-24 周三 01:00" in texts
-    assert any("可能不完全准确" in text for text in texts)
-    assert "来源 test" in texts
-    assert not {"上半赛季", "下半赛季", "下半赛季开始"}.intersection(texts)
-    assert season.status_text not in all_drawn_texts
-    assert "进行中" not in all_drawn_texts
-
-    split_fraction = main._season_split_fraction(season)
-    assert split_fraction is not None
-    split_x = 48 + round(744 * split_fraction)
-    pixels = image.load()
-
-    def is_divider_green(pixel):
-        red, green, blue = pixel
-        return green >= 190 and green >= red + 70 and green >= blue + 35
-
-    divider_row = [
-        x for x in range(split_x - 10, split_x + 11) if is_divider_green(pixels[x, 260])
-    ]
-    divider_column = [
-        y for y in range(230, 290) if is_divider_green(pixels[split_x, y])
-    ]
-    assert len(divider_row) == pytest.approx(7, abs=1)
-    assert len(divider_column) == pytest.approx(42, abs=1)
-
-    split_record = next(
-        record for record in text_records if record[2] == "2026-06-24 周三 01:00"
-    )
-    split_draw, split_xy, split_text, split_font, _fill = split_record
-    split_text_box = split_draw.textbbox(split_xy, split_text, font=split_font)
-    assert split_text_box[1] - max(divider_column) >= 20
-
-
 def test_season_card_draws_remaining_in_top_right_header():
     main_module = _load_main_module()
     main = object.__new__(main_module.Main)
@@ -2832,7 +2579,7 @@ def test_season_card_draws_remaining_in_top_right_header():
     remaining_record = next(
         record
         for record in text_records
-        if record[2] == "距赛季结束 13天 5小时"
+        if record[2] == "距分段结束 13天 5小时"
     )
     date_box = date_record[0].textbbox(
         date_record[1], date_record[2], font=date_record[3]
@@ -2846,7 +2593,7 @@ def test_season_card_draws_remaining_in_top_right_header():
     title_box = title_record[0].textbbox(
         title_record[1], title_record[2], font=title_record[3]
     )
-    source_record = next(record for record in text_records if record[2] == "来源 test")
+    source_record = next(record for record in text_records if record[2] == "来源 api.mozambiquehe.re")
     source_box = source_record[0].textbbox(
         source_record[1], source_record[2], font=source_record[3]
     )
@@ -2876,36 +2623,16 @@ def test_season_card_ended_state_uses_nonnegative_remaining_text():
     )
 
     texts = [record[2] for record in text_records]
-    assert "赛季已结束" in texts
+    assert "分段已结束" in texts
     assert not any("负" in text for text in texts)
-
-
-def test_season_card_only_draws_split_countdown_before_boundary():
-    main_module = _load_main_module()
-    season = _season_29(main_module)
-
-    def render_texts(now):
-        main = object.__new__(main_module.Main)
-        records = _record_season_card_shadow_text(main)
-        main._build_season_info_card(season, now=now)
-        return [record[2] for record in records]
-
-    upper_half_texts = render_texts(
-        datetime(2026, 6, 11, 11, tzinfo=timezone.utc)
-    )
-    lower_half_texts = render_texts(
-        datetime(2026, 7, 10, 0, tzinfo=timezone.utc)
-    )
-
-    assert "距下半赛季 12天 6小时" in upper_half_texts
-    assert not any(text.startswith("距下半赛季") for text in lower_half_texts)
 
 
 def test_season_card_truncates_long_title_within_header_lane():
     main_module = _load_main_module()
     main = object.__new__(main_module.Main)
     season = _season_29(main_module)
-    season.season_name = "超频" * 60
+    # 赛季代号（season_name）已随第三方数据源移除，这里用超长分段名撑满标题栏。
+    season.current_split_label = "下半赛季" * 60
     text_records = _record_season_card_shadow_text(main)
 
     main._build_season_info_card(
@@ -2938,20 +2665,17 @@ def test_season_card_uses_readable_timeline_and_single_line_disclaimer():
     def record_for(text):
         return next(record for record in text_records if record[2] == text)
 
-    assert getattr(record_for("赛季开始")[3], "size", 0) >= 17
-    assert getattr(record_for("赛季结束")[3], "size", 0) >= 17
+    assert getattr(record_for("分段开始")[3], "size", 0) >= 17
+    assert getattr(record_for("分段结束")[3], "size", 0) >= 17
+    # 中间的分段刻度已移除：进度条本身就是当前分段。
     time_texts = (
         "2026-05-06 周三 01:00",
-        "2026-06-24 周三 01:00",
         "2026-08-05 周三 01:00",
     )
     time_records = [record_for(text) for text in time_texts]
     assert all(getattr(record[3], "size", 0) >= 16 for record in time_records)
 
-    disclaimer_text = (
-        "下半赛季分界按赛季中点后首个北京时间周三 01:00 推测，"
-        "可能不完全准确，仅供参考。"
-    )
+    disclaimer_text = "分段时间来自游戏内排位数据，精确到分钟。"
     disclaimer_record = record_for(disclaimer_text)
     target_records = time_records + [disclaimer_record]
     native_boxes = [
@@ -3001,180 +2725,11 @@ def test_season_card_uses_readable_timeline_and_single_line_disclaimer():
         assert visible_pixels >= max(10, int(len(pixels) * 0.04))
 
 
-def test_season_card_uses_source_note_for_s20_like_inexact_public_split():
-    main_module = _load_main_module()
-    main = object.__new__(main_module.Main)
-    season = _season_29(main_module)
-    note = (
-        "日期来自 Esports Tales；网站未提供精确时刻，"
-        "已按北京时间周三凌晨 1 点推导。"
-    )
-    season.season_number = 20
-    season.season_name = "Breakout"
-    season.start_iso = "2024-02-13T18:00:00Z"
-    season.end_iso = "2024-05-07T17:00:00Z"
-    season.split_source = "esportstales.com"
-    season.split_note = note
-    season.splits[0].start_iso = season.start_iso
-    season.splits[0].end_iso = "2024-04-02T17:00:00Z"
-    season.splits[1].start_iso = "2024-04-02T17:00:00Z"
-    season.splits[1].end_iso = season.end_iso
-    for split_info in season.splits:
-        split_info.source = "esportstales.com"
-        split_info.exact = False
-        split_info.note = note
-    text_records = _record_season_card_shadow_text(main)
-
-    main._build_season_info_card(
-        season,
-        now=datetime(2024, 4, 10, tzinfo=timezone.utc),
-    )
-
-    texts = [record[2] for record in text_records]
-    assert note in texts
-    assert not any("赛季中点后首个北京时间周三" in text for text in texts)
-    assert not any("仅供参考" in text for text in texts)
-
-
-@pytest.mark.parametrize("with_note", [True, False])
-def test_season_card_does_not_call_exact_public_split_a_midpoint_prediction(
-    with_note,
-):
-    main_module = _load_main_module()
-    main = object.__new__(main_module.Main)
-    season = _season_29(main_module)
-    note = "来自 Respawn 公告的精确 Split 时间。" if with_note else ""
-    season.split_source = "Respawn"
-    season.split_note = note
-    for split_info in season.splits:
-        split_info.source = "Respawn"
-        split_info.exact = True
-        split_info.note = note
-    text_records = _record_season_card_shadow_text(main)
-
-    main._build_season_info_card(
-        season,
-        now=datetime(2026, 7, 10, tzinfo=timezone.utc),
-    )
-
-    texts = [record[2] for record in text_records]
-    assert not any("赛季中点后首个北京时间周三" in text for text in texts)
-    assert (note in texts) is with_note
-
-
-@pytest.mark.parametrize("split_fraction", [0.05, 0.95, None])
-def test_season_card_keeps_edge_split_annotations_in_safe_lanes(
-    monkeypatch, split_fraction
-):
-    main_module = _load_main_module()
-    main = object.__new__(main_module.Main)
-    season = _season_29(main_module)
-    text_records = _record_season_card_shadow_text(main)
-    pill_boxes = []
-    original_rounded_rectangle = main_module.ImageDraw.ImageDraw.rounded_rectangle
-
-    def record_rounded_rectangle(draw, xy, *args, **kwargs):
-        if kwargs.get("fill") == (22, 74, 50, 246):
-            pill_boxes.append(tuple(xy))
-        return original_rounded_rectangle(draw, xy, *args, **kwargs)
-
-    monkeypatch.setattr(
-        main_module.ImageDraw.ImageDraw,
-        "rounded_rectangle",
-        record_rounded_rectangle,
-    )
-
-    start_dt = main._parse_card_datetime(season.start_iso)
-    end_dt = main._parse_card_datetime(season.end_iso)
-    assert start_dt is not None
-    assert end_dt is not None
-    original_split_time = main._to_beijing_time_with_weekday(
-        season.splits[0].end_iso
-    )
-    if split_fraction is None:
-        season.splits = []
-        render_now = start_dt + timedelta(days=1)
-        expected_split_time = original_split_time
-    else:
-        boundary = start_dt + (end_dt - start_dt) * split_fraction
-        boundary_iso = boundary.isoformat().replace("+00:00", "Z")
-        season.splits[0].end_iso = boundary_iso
-        season.splits[1].start_iso = boundary_iso
-        render_now = start_dt + (boundary - start_dt) / 2
-        expected_split_time = main._to_beijing_time_with_weekday(boundary_iso)
-
-    image = main._build_season_info_card(season, now=render_now)
-    texts = [record[2] for record in text_records]
-
-    assert "赛季开始" in texts
-    assert "赛季结束" in texts
-    assert "来源 test" in texts
-
-    if split_fraction is None:
-        assert not pill_boxes
-        assert expected_split_time not in texts
-        assert not any(text.startswith("距下半赛季") for text in texts)
-        assert not any(
-            pixel[1] >= 190
-            and pixel[1] >= pixel[0] + 70
-            and pixel[1] >= pixel[2] + 35
-            for y in range(237, 285)
-            for pixel in (image.getpixel((x, y)) for x in range(40, 801))
-        )
-        return
-
-    assert len(pill_boxes) == 1
-    pill_left, _pill_top, pill_right, _pill_bottom = pill_boxes[0]
-    assert 24 <= pill_left < pill_right <= image.width - 24
-
-    countdown_record = next(
-        record for record in text_records if record[2].startswith("距下半赛季")
-    )
-    countdown_box = countdown_record[0].textbbox(
-        countdown_record[1], countdown_record[2], font=countdown_record[3]
-    )
-    assert 0 <= countdown_box[0] < countdown_box[2] <= image.width
-    source_record = next(record for record in text_records if record[2] == "来源 test")
-    source_box = source_record[0].textbbox(
-        source_record[1], source_record[2], font=source_record[3]
-    )
-
-    def boxes_overlap(first, second):
-        return not (
-            first[2] <= second[0]
-            or second[2] <= first[0]
-            or first[3] <= second[1]
-            or second[3] <= first[1]
-        )
-
-    assert not boxes_overlap(source_box, pill_boxes[0])
-
-    start_time = main._to_beijing_time_with_weekday(season.start_iso)
-    end_time = main._to_beijing_time_with_weekday(season.end_iso)
-
-    def text_box(text):
-        record = next(item for item in text_records if item[2] == text)
-        return record[0].textbbox(record[1], record[2], font=record[3])
-
-    start_box = text_box(start_time)
-    split_box = text_box(expected_split_time)
-    end_box = text_box(end_time)
-    assert 0 <= split_box[0] < split_box[2] <= image.width
-    assert split_box[0] >= max(220, start_box[2])
-    assert split_box[2] <= min(620, end_box[0])
-
-    expected_split_x = 48 + round(744 * split_fraction)
-    divider_pixel = image.getpixel((expected_split_x, 260))
-    assert divider_pixel[1] >= 190
-    assert divider_pixel[1] >= divider_pixel[0] + 70
-
-
 def test_season_helpers_handle_invalid_and_missing_timestamps():
     main_module = _load_main_module()
     season = _season_29(main_module)
     season.start_iso = "not-a-timestamp"
     season.end_iso = ""
-    season.splits[0].end_iso = ""
 
     assert main_module.Main._parse_card_datetime("") is None
     assert main_module.Main._parse_card_datetime("not-a-timestamp") is None
@@ -3182,9 +2737,7 @@ def test_season_helpers_handle_invalid_and_missing_timestamps():
         "2026-06-23T17:00:00"
     ) == datetime(2026, 6, 23, 17, tzinfo=timezone.utc)
     assert main_module.Main._season_progress_fraction(season) == 0.0
-    assert main_module.Main._season_split_boundary(season) is None
-    assert main_module.Main._season_split_fraction(season) is None
-    assert main_module.Main._format_split_remaining(season) == ""
+    assert main_module.Main._format_season_end_remaining(season) == ""
     assert main_module.Main._to_beijing_time_with_weekday("") == ""
     assert main_module.Main._to_beijing_time_with_weekday("invalid") == ""
 

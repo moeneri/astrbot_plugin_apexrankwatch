@@ -111,5 +111,11 @@
     "type": "string",
     "hint": "image 为图片模式，text 为文字模式。默认 image，适合 QQ 群图文展示；text 会用紧凑排版和 emoji 图标输出。",
     "default": "image"
+  },
+  "season_probe_player": {
+    "description": "赛季分段探测账号",
+    "type": "string",
+    "hint": "查询排位分段时间时使用的玩家ID。分段窗口对所有玩家一致，任填一个稳定存在的账号即可；留空则使用默认账号 moeneri。",
+    "default": ""
   }
 }

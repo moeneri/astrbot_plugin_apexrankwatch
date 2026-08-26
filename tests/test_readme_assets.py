@@ -83,11 +83,12 @@ def test_readme_overview_image_is_not_known_bad_rankwatch_score_preview():
     assert image_hash not in BAD_OVERVIEW_IMAGE_HASHES
 
 
-def test_metadata_version_is_patch_release():
+def test_metadata_version_is_current_release():
     metadata_path = Path(__file__).resolve().parents[1] / "metadata.yaml"
     metadata = metadata_path.read_text(encoding="utf-8")
 
-    assert "version: 2.4.7" in metadata
+    # 2.5.0 是次版本号：移除了整赛季展示与历史赛季查询，改为纯 API 分段。
+    assert "version: 2.5.0" in metadata
 
 
 def test_season_remaining_time_is_documented_in_readme_and_metadata():
@@ -96,9 +97,11 @@ def test_season_remaining_time_is_documented_in_readme_and_metadata():
     metadata = (root / "metadata.yaml").read_text(encoding="utf-8")
 
     for content in (readme, metadata):
-        assert "赛季结束时间和剩余时间" in content
+        assert "排位分段结束时间和剩余时间" in content
 
-    assert "赛季开始、结束和新赛季切换边界统一按北京时间凌晨 1 点" in readme
+    # 国服更新口径必须写进文档（见 apex_service 里 b30150f 的说明）。
+    assert "北京时间周三凌晨 1 点" in readme
+    assert "00:30 关闭排位" in readme
 
 
 def test_readme_intro_mentions_codex_assistance():
@@ -189,6 +192,9 @@ def test_readme_bottom_documents_data_and_api_sources():
     assert "## 数据来源" in readme
     assert "Apex Legends API" in source_section
     assert "api.mozambiquehe.re" in source_section
-    assert "apexseasons.online" in source_section
-    assert "EA 官方当前赛季页" in source_section
+    assert "rankedSeasonMeta" in source_section
     assert "实时返回为准" in source_section
+    # 第三方赛季数据源已整体移除，不允许回流。
+    assert "apexseasons.online" not in readme
+    assert "esportstales" not in readme
+    assert "EA 官方" not in readme

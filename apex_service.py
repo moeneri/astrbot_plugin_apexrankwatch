@@ -23,71 +23,21 @@ _TRANSLATIONS_FILE = Path(__file__).with_name("translations.json")
 
 APEX_API_PORTAL_URL = "https://portal.apexlegendsapi.com/"
 APEX_API_VERIFY_URL = "https://portal.apexlegendsapi.com/discord-auth"
-APEX_SEASONS_HOME_URL = "https://apexseasons.online/"
-APEX_SEASONS_ALLOWED_HOSTS = frozenset(
-    {"apexseasons.online", "www.apexseasons.online"}
-)
-APEX_SEASONS_MAX_REDIRECTS = 4
-APEX_SEASONS_CURRENT_CANDIDATE_LIMIT = 4
-EA_APEX_HOME_URL = "https://www.ea.com/games/apex-legends/apex-legends"
-EA_APEX_ALLOWED_HOSTS = frozenset({"ea.com", "www.ea.com"})
-ESPORTSTALES_SEASONS_URL = "https://www.esportstales.com/apex-legends/season-end-date"
+# 页面抓取的通用重定向上限（目前只有全天地图日程还需要抓网页）。
+MAX_PAGE_REDIRECTS = 4
 APEX_STATUS_RANKED_MAP_URL = "https://apexlegendsstatus.com/current-map/battle_royale/ranked"
 APEX_STATUS_PUBS_MAP_URL = "https://apexlegendsstatus.com/current-map/battle_royale/pubs"
 MAX_DAILY_MAP_CALIBRATION_OFFSET_SECS = 12 * 60 * 60
 SEASON_MAP_POOL_LOCK_BEFORE_END_SECS = 2 * 60 * 60
 SEASON_MAP_POOL_LOCK_AFTER_END_SECS = 12 * 60 * 60
 
-JSONLD_SCRIPT_RE = re.compile(
-    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-    re.IGNORECASE | re.DOTALL,
-)
-NEXT_DATA_SCRIPT_RE = re.compile(
-    r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
-    re.IGNORECASE | re.DOTALL,
-)
-EA_CURRENT_SEASON_LINK_RE = re.compile(
-    r'href=["\'](?P<url>[^"\']*/games/apex-legends/apex-legends/seasons/'
-    r'[a-z0-9][a-z0-9-]*/?)["\']',
+# ALS `/bridge` 的 global.rank.rankedSeason 形如 `br_ranked_s30_s1`：
+# s30 = 赛季号，s1 = 该赛季内的分段序号（1 = 上半赛季，2 = 下半赛季）。
+# 老版本出现过 `season30_split1` 这类写法，这里一并容错。
+RANKED_SEASON_ID_RE = re.compile(
+    r"^(?:br_ranked_)?s(?:eason)?(?P<season>\d+)_s(?:plit)?(?P<split>\d+)$",
     re.IGNORECASE,
 )
-SEASON_LIVE_RE = re.compile(
-    r"Season\s+(\d+)\s*[·•:：\-–—]?\s*([^\n]+?)\s+is\s+live\s+now",
-    re.IGNORECASE,
-)
-SEASON_STARTED_RE = re.compile(
-    r"Season\s+(\d+)\s*[·•:：\-–—]?\s*([^\n]+?)\s+Started",
-    re.IGNORECASE,
-)
-SEASON_NAME_RE = re.compile(r"Season\s+(\d+)\s*[·•:：\-–—]?\s*(.+)", re.IGNORECASE)
-DATE_RANGE_RE = re.compile(
-    r"Started\s+([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}).*?"
-    r"Ends\s+([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})",
-    re.IGNORECASE | re.DOTALL,
-)
-TIMEZONE_RE = re.compile(r"Timezone\s*[·•:：]?\s*([^\n<]+)", re.IGNORECASE)
-UPDATE_HINT_RE = re.compile(
-    r"Respawn\s+deploys\s+all\s+major\s+(?:Apex\s+Legends\s+)?updates\s+at\s+([^.]+)",
-    re.IGNORECASE,
-)
-COUNTDOWN_ARRAY_RE = re.compile(
-    r'targetDate"\s*:\s*\[0\s*,\s*"([^"]+)"\]',
-    re.IGNORECASE,
-)
-COUNTDOWN_STRING_RE = re.compile(
-    r'targetDate"\s*:\s*"([^"]+)"',
-    re.IGNORECASE,
-)
-SEASON_SECTION_RE = re.compile(
-    r"<h3[^>]*>\s*Season\s+(?P<number>\d+):\s*(?P<name>[^<]+)</h3>(?P<body>.*?)(?=<h3[^>]*>\s*Season\s+\d+:|\Z)",
-    re.IGNORECASE | re.DOTALL,
-)
-SPLIT_LINE_RE = re.compile(
-    r"Season\s+(?P<number>\d+)\s+Split\s+(?P<split>\d+)\s*:\s*from\s+(?P<start>.+?)\s+to\s+(?P<end>.+?)(?:\.|$)",
-    re.IGNORECASE,
-)
-MONTH_DAY_RE = re.compile(r"([A-Za-z]{3,9})\s+(\d{1,2})(?:,\s*(\d{4}))?")
-FUZZY_DATE_TOKEN_RE = re.compile(r"/|around|approx|estimate|estimated", re.IGNORECASE)
 MAP_SCHEDULE_ENTRY_RE = re.compile(
     r"<h3[^>]*>(?P<map>.*?)</h3>.*?"
     r"From\s*<span\s+data-tz=[\"'](?P<start>\d+)[\"'][^>]*>.*?</span>"
@@ -315,62 +265,38 @@ class PredatorInfo:
 
 @dataclass
 class SeasonInfo:
+    """当前排位分段信息，唯一来源是 ALS `/bridge` 的 `global.rank.rankedSeasonMeta`。
+
+    重要语义：`start_iso` / `end_iso` 是**当前分段**（上半或下半赛季）的起止，
+    不是整个赛季的起止。ALS 没有任何赛季级别的时间字段（`/seasons` 不存在、
+    `/gamedata?type=seasons` 返回空），而本插件已不再抓取第三方网站，
+    因此“整赛季起止”和赛季代号（如 Marked）都不再可得。
+    """
+
     season_number: int | None
-    season_name: str
-    start_date: str
-    end_date: str
-    timezone: str
-    update_time_hint: str
-    source: str
-    season_url: str
+    split_index: int | None
+    ranked_season_id: str
     start_iso: str
     end_iso: str
+    start_date: str
+    end_date: str
+    source: str = "api.mozambiquehe.re"
     status_text: str = "未知"
     current_split_label: str = ""
-    current_split_index: int | None = None
     next_transition_label: str = ""
     next_transition_iso: str = ""
-    split_source: str = ""
     split_note: str = ""
-    supports_ranked_splits: bool = False
-    splits: list["SeasonSplitInfo"] = field(default_factory=list)
 
 
 @dataclass
-class SeasonSplitInfo:
-    index: int
-    label: str
-    stage_name: str
-    start_iso: str
-    end_iso: str
-    start_date: str
-    end_date: str
-    source: str
-    exact: bool = True
-    note: str = ""
+class _RankedSplitWindow:
+    """从 `global.rank` 解析出来的一段排位分段窗口。"""
 
-
-@dataclass
-class _SeasonReference:
-    season_number: int | None
-    season_name: str
-    season_url: str
-    position: int = 0
-
-
-@dataclass
-class _SplitTextRange:
-    index: int
-    start_text: str
-    end_text: str
-
-
-@dataclass
-class _SplitBoundaryResolution:
-    boundary: datetime
-    source: str
-    note: str
-    exact: bool
+    season_number: int
+    split_index: int
+    ranked_season_id: str
+    start: datetime
+    end: datetime
 
 
 class PlayerNotFoundError(Exception):
@@ -433,15 +359,26 @@ class ApexApiClient:
         max_retries: int,
         logger,
         debug_enabled: bool = False,
+        season_probe_player: str = "",
     ) -> None:
         self._api_key = api_key
         self._timeout = max(1, int(timeout_ms)) / 1000.0
         self._max_retries = max(0, int(max_retries))
         self._logger = logger
         self._debug_enabled = debug_enabled
+        # 分段信息随便查一个玩家就能拿到（分段窗口对所有玩家一致），
+        # 这个探测账号只在没有其它玩家可借用时才会被查询。
+        self._season_probe_player = str(season_probe_player or "").strip() or "moeneri"
         self._season_cache_ttl_seconds = 30 * 60
         self._season_cache: dict[str, tuple[float, SeasonInfo]] = {}
         self._season_lock = asyncio.Lock()
+        # 最近一次成功拿到的分段窗口。缓存条目会在 now 落到窗口之外时被判失效
+        # （这是对的，分段翻页要及时跟上），但「锚定到北京 01:00」意味着冬令时
+        # 每次翻页都有约 1 小时的空档：锚定后的 end 已过，而 ALS 仍在返回旧窗口。
+        # 没有冷却的话这段时间每次调用都会真打一次 /bridge，而关键词监听器
+        # 会把它放大成「每条含『赛季』的群消息一次请求」。
+        self._season_probe_cooldown_seconds = 5 * 60
+        self._last_season_probe: tuple[float, _RankedSplitWindow] | None = None
         self._live_cache_ttl_seconds = 60
         self._map_rotation_cache: tuple[float, MapRotationInfo] | None = None
         self._map_rotation_lock = asyncio.Lock()
@@ -450,7 +387,6 @@ class ApexApiClient:
         self._daily_map_lock = asyncio.Lock()
         self._predator_cache: tuple[float, PredatorInfo] | None = None
         self._predator_lock = asyncio.Lock()
-        self._split_index_cache: tuple[float, dict[int, list[_SplitTextRange]]] | None = None
         self._client = httpx.AsyncClient(
             timeout=self._timeout,
             follow_redirects=True,
@@ -466,12 +402,16 @@ class ApexApiClient:
         api_url = "https://api.mozambiquehe.re/bridge"
         params = {"auth": self._api_key, "player": player_name, "platform": platform}
         data = await self._request_player_data(api_url, params, player_name)
+        # 顺手把分段信息缓存下来：每次玩家查询都自带 rankedSeasonMeta，
+        # 这样绝大多数情况下 /新赛季 不需要额外发一次 API 请求。
+        self._note_ranked_split_payload(data)
         return _parse_player_stats(data, platform, player_name)
 
     async def fetch_player_stats_by_uid(self, uid: str, platform: str) -> ApexPlayerStats:
         api_url = "https://api.mozambiquehe.re/bridge"
         params = {"auth": self._api_key, "uid": uid, "platform": platform}
         data = await self._request_player_data(api_url, params, uid)
+        self._note_ranked_split_payload(data)
         return _parse_player_stats(data, platform, uid)
 
     async def fetch_map_rotation_info(self) -> MapRotationInfo:
@@ -608,25 +548,9 @@ class ApexApiClient:
         raise PlayerNotFoundError(f"Player not found: {identifier}")
 
     async def fetch_season_info(self, season_number: int | None = None) -> SeasonInfo:
-        if season_number is None:
-            return await self.fetch_current_season_info()
-
-        cache_key = f"season:{season_number if season_number is not None else 'current'}"
-        cached = self._get_cached_season(cache_key)
-        if cached is not None:
-            return cached
-
-        async with self._season_lock:
-            cached = self._get_cached_season(cache_key)
-            if cached is not None:
-                return cached
-
-            season_info = await self._fetch_season_from_apexseasons(
-                season_number,
-                use_public_split_index=True,
-            )
-            self._season_cache[cache_key] = (time.monotonic(), season_info)
-            return season_info
+        # 历史赛季查询已移除：ALS 只暴露“当前分段”，没有任何按赛季号回溯的接口，
+        # 而第三方赛季网站已整体下线。保留形参仅为兼容既有调用方。
+        return await self.fetch_current_season_info()
 
     async def fetch_current_season_info(
         self,
@@ -643,154 +567,68 @@ class ApexApiClient:
             if cached is not None:
                 return cached
 
-            try:
-                season_info = await self._fetch_season_from_apexseasons(
-                    None,
-                    use_public_split_index=False,
-                    now=effective_now,
-                )
-            except Exception as primary_error:
-                self._logger.warning(
-                    "公开倒计时页面未提供有效当前赛季，正在回退 EA 官方赛季页: "
-                    f"{primary_error}"
-                )
-                try:
-                    season_info = await self._fetch_current_season_from_ea(
-                        now=effective_now,
-                    )
-                except Exception as fallback_error:
-                    self._logger.warning(
-                        f"EA 官方赛季页回退失败: {fallback_error}"
-                    )
-                    raise RuntimeError(
-                        f"{primary_error}；EA 官方赛季页回退失败: {fallback_error}"
-                    ) from fallback_error
+            # 冷却期内直接用上次拿到的窗口重建（重建会按新的 now 重新推导状态
+            # 文案），避免在「锚定 end 已过、ALS 尚未翻页」的空档里反复打接口。
+            recent = self._last_season_probe
+            if (
+                recent is not None
+                and time.monotonic() - recent[0] < self._season_probe_cooldown_seconds
+            ):
+                return _build_season_info_from_split(recent[1], now=effective_now)
+
+            window = await self._probe_ranked_split_window()
+            season_info = _build_season_info_from_split(window, now=effective_now)
+            self._last_season_probe = (time.monotonic(), window)
             self._season_cache[cache_key] = (time.monotonic(), season_info)
             return season_info
 
-    async def _fetch_current_season_from_ea(
-        self,
-        *,
-        now: datetime | None = None,
-    ) -> SeasonInfo:
-        home_url = _require_allowed_https_url(
-            EA_APEX_HOME_URL,
-            EA_APEX_ALLOWED_HOSTS,
-        )
-        home_html = await self._request_text_with_retry(
-            home_url,
-            allowed_hosts=EA_APEX_ALLOWED_HOSTS,
-        )
-        season_url = _extract_ea_current_season_url(home_html)
-        season_url = _require_allowed_https_url(
-            season_url,
-            EA_APEX_ALLOWED_HOSTS,
-        )
-        detail_html = await self._request_text_with_retry(
-            season_url,
-            allowed_hosts=EA_APEX_ALLOWED_HOSTS,
-        )
-        effective_now = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
-        season_info = _build_ea_season_info(
-            detail_html,
-            season_url=season_url,
-            now=effective_now,
-        )
-        start, end = _require_complete_season_range(season_info)
-        if not start <= effective_now < end:
-            raise RuntimeError("EA 官方赛季页未提供包含当前时间的完整赛季数据")
-        _apply_ranked_split_details(season_info, {}, now=effective_now)
-        return season_info
+    async def _probe_ranked_split_window(self) -> _RankedSplitWindow:
+        """用探测账号查一次 /bridge，只为读取 rankedSeasonMeta。
 
-    async def _fetch_season_from_apexseasons(
-        self,
-        season_number: int | None,
-        *,
-        use_public_split_index: bool,
-        now: datetime | None = None,
-    ) -> SeasonInfo:
-        home_url = _require_allowed_https_url(
-            APEX_SEASONS_HOME_URL,
-            APEX_SEASONS_ALLOWED_HOSTS,
-        )
-        home_html = await self._request_text_with_retry(
-            home_url,
-            allowed_hosts=APEX_SEASONS_ALLOWED_HOSTS,
-        )
-        references = _extract_season_references(home_html)
-        if not references:
-            raise RuntimeError("无法从赛季首页提取赛季列表")
-        effective_now = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
-
-        async def fetch_reference(reference: _SeasonReference) -> SeasonInfo:
-            detail_html = ""
-            if reference.season_url:
-                detail_url = _require_allowed_https_url(
-                    reference.season_url,
-                    APEX_SEASONS_ALLOWED_HOSTS,
-                )
-                detail_html = await self._request_text_with_retry(
-                    detail_url,
-                    allowed_hosts=APEX_SEASONS_ALLOWED_HOSTS,
-                )
-            return _build_season_info(
-                reference=reference,
-                home_html=home_html,
-                detail_html=detail_html,
+        分段窗口对全服玩家一致，所以查谁都行；这里用固定账号是为了不依赖
+        “恰好有玩家被查询过”。正常情况下这个请求很少真正发出，因为任何一次
+        玩家查询都会通过 _note_ranked_split_payload 把分段写进缓存。
+        """
+        api_url = "https://api.mozambiquehe.re/bridge"
+        params = {
+            "auth": self._api_key,
+            "player": self._season_probe_player,
+            "platform": "PC",
+        }
+        try:
+            data = await self._request_player_data(
+                api_url, params, self._season_probe_player
             )
+        except PlayerNotFoundError as exc:
+            # 探测账号被改名/删号/封禁时会走到这里。不指出是探测账号的问题，
+            # 管理员只会看到「查询失败」，完全无从下手。
+            raise ApexApiError(
+                f"分段探测账号「{self._season_probe_player}」查不到，"
+                "请在插件配置中修改 season_probe_player 为一个有效的玩家ID。"
+            ) from exc
+        window = _parse_ranked_split_window(data)
+        if window is None:
+            raise ApexApiError("接口未返回排位分段信息，暂时无法确定分段时间")
+        return window
 
-        if season_number is None:
-            season_info = None
-            current_references = sorted(
-                references,
-                key=lambda reference: (
-                    reference.season_number is None,
-                    -(reference.season_number or 0),
-                    reference.position or 9999,
-                    reference.season_url,
-                ),
-            )
-            for reference in current_references[:APEX_SEASONS_CURRENT_CANDIDATE_LIMIT]:
-                try:
-                    candidate = await fetch_reference(reference)
-                except httpx.HTTPStatusError as exc:
-                    status = (
-                        exc.response.status_code
-                        if exc.response is not None
-                        else 0
-                    )
-                    if status in (404, 410):
-                        continue
-                    raise
-                try:
-                    start, end = _require_complete_season_range(candidate)
-                except RuntimeError:
-                    continue
-                if start > effective_now:
-                    continue
-                if end <= effective_now:
-                    break
-                season_info = candidate
-                break
-            if season_info is None:
-                raise RuntimeError("未找到包含当前时间且具有可信完整起止时间的赛季数据")
-        else:
-            target = next(
-                (
-                    item
-                    for item in references
-                    if item.season_number == season_number
-                ),
-                None,
-            )
-            if target is None:
-                raise RuntimeError(f"未找到 S{season_number} 的赛季数据")
-            season_info = await fetch_reference(target)
-            _require_complete_season_range(season_info)
+    def _note_ranked_split_payload(self, data: Any) -> None:
+        """从任意一次玩家查询结果里顺手提取分段窗口并写入缓存。
 
-        split_index = await self._get_split_index() if use_public_split_index else {}
-        _apply_ranked_split_details(season_info, split_index, now=effective_now)
-        return season_info
+        这是「顺带」的簿记，绝不能让它把正常的段位查询搞失败，因此整段都在
+        try 里 —— 包括构建 SeasonInfo 的部分。
+        """
+        try:
+            window = _parse_ranked_split_window(data)
+            if window is None:
+                return
+            now_mono = time.monotonic()
+            self._last_season_probe = (now_mono, window)
+            self._season_cache["season:current"] = (
+                now_mono,
+                _build_season_info_from_split(window),
+            )
+        except Exception as exc:  # pragma: no cover - 防御性
+            self._logger.debug(f"记录排位分段信息失败（不影响本次查询）: {exc}")
 
     async def _fetch_player(
         self, identifier: str, platform: str, use_uid: bool
@@ -1071,7 +909,7 @@ class ApexApiClient:
                                 request=response.request,
                                 response=response,
                             )
-                        if redirects_followed >= APEX_SEASONS_MAX_REDIRECTS:
+                        if redirects_followed >= MAX_PAGE_REDIRECTS:
                             raise httpx.TooManyRedirects(
                                 "Too many redirects for season page request",
                                 request=response.request,
@@ -1145,16 +983,6 @@ class ApexApiClient:
         )
         _update_current_split_state(season_info, now=now_dt)
         return season_info
-
-    async def _get_split_index(self) -> dict[int, list[_SplitTextRange]]:
-        cached = self._split_index_cache
-        if cached and (time.monotonic() - cached[0]) <= self._season_cache_ttl_seconds:
-            return cached[1]
-
-        html = await self._request_text_with_retry(ESPORTSTALES_SEASONS_URL)
-        index = _parse_split_index_from_esportstales(html)
-        self._split_index_cache = (time.monotonic(), index)
-        return index
 
     @staticmethod
     def _retry_delay(attempt: int) -> int:
@@ -1779,9 +1607,15 @@ def _learning_map_pool_allows_tentative_forecast(pool_state: DailyMapPoolState) 
 def _daily_map_season_key(season_info: SeasonInfo | None) -> str:
     if season_info is None:
         return ""
+    # ranked_season_id 形如 br_ranked_s30_s1，本身就是「赛季+分段」的唯一标识。
+    # 用它做 key 的附带好处：跨分段时地图池学习状态会自动重置 —— 排位地图池
+    # 本来就按分段轮换，这正是想要的行为。
+    ranked_id = str(getattr(season_info, "ranked_season_id", "") or "").strip()
+    if ranked_id:
+        return ranked_id
     if season_info.season_number is not None:
-        name = str(season_info.season_name or "").strip()
-        return f"S{season_info.season_number}:{name}"
+        split_index = getattr(season_info, "split_index", None)
+        return f"S{season_info.season_number}:s{split_index or ''}"
     if season_info.start_iso or season_info.end_iso:
         return f"{season_info.start_iso}:{season_info.end_iso}"
     return ""
@@ -2305,218 +2139,6 @@ def _to_float(value: Any) -> float | None:
         return None
 
 
-def _extract_jsonld_blocks(html: str) -> list[str]:
-    return JSONLD_SCRIPT_RE.findall(html or "")
-
-
-def _extract_jsonld_items(html: str) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    for block in _extract_jsonld_blocks(html):
-        try:
-            parsed = json.loads(block.strip())
-        except Exception:
-            continue
-        if isinstance(parsed, dict):
-            items.append(parsed)
-        elif isinstance(parsed, list):
-            items.extend(item for item in parsed if isinstance(item, dict))
-    return items
-
-
-def _extract_ea_current_season_url(home_html: str) -> str:
-    for match in EA_CURRENT_SEASON_LINK_RE.finditer(home_html or ""):
-        candidate = urljoin(
-            EA_APEX_HOME_URL,
-            unescape(match.group("url")).strip(),
-        )
-        return _require_allowed_https_url(candidate, EA_APEX_ALLOWED_HOSTS)
-    raise RuntimeError("无法从 EA 官方首页提取当前赛季链接")
-
-
-def _find_named_dict(value: Any, names: tuple[str, ...]) -> dict[str, Any] | None:
-    if isinstance(value, dict):
-        for name in names:
-            candidate = value.get(name)
-            if isinstance(candidate, dict):
-                return candidate
-        for candidate in value.values():
-            found = _find_named_dict(candidate, names)
-            if found is not None:
-                return found
-    elif isinstance(value, list):
-        for candidate in value:
-            found = _find_named_dict(candidate, names)
-            if found is not None:
-                return found
-    return None
-
-
-def _extract_ea_season_details(detail_html: str) -> dict[str, Any]:
-    match = NEXT_DATA_SCRIPT_RE.search(detail_html or "")
-    if not match:
-        raise RuntimeError("EA 官方赛季页缺少机器可读数据")
-    try:
-        payload = json.loads(match.group(1).strip())
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError("EA 官方赛季页机器可读数据格式无效") from exc
-
-    details = _find_named_dict(
-        payload,
-        ("seasonDetails", "seasonDetailsFallback"),
-    )
-    if details is None:
-        raise RuntimeError("EA 官方赛季页缺少当前赛季详情")
-    return details
-
-
-def _iter_text_values(value: Any):
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for candidate in value.values():
-            yield from _iter_text_values(candidate)
-    elif isinstance(value, list):
-        for candidate in value:
-            yield from _iter_text_values(candidate)
-
-
-def _extract_ea_season_number(details: dict[str, Any]) -> int | None:
-    identity_sections = [
-        details.get("meta"),
-        details.get("logo"),
-        details.get("headerMedia"),
-        details.get("backgroundVideo"),
-    ]
-    for text in _iter_text_values(identity_sections):
-        match = re.search(r"\bseason\s+(\d+)\b", text, re.IGNORECASE)
-        if match:
-            return _to_int(match.group(1))
-    for text in _iter_text_values(identity_sections):
-        match = re.search(r"(?<![A-Za-z0-9])S(\d+)(?!\d)", text, re.IGNORECASE)
-        if match:
-            return _to_int(match.group(1))
-    return None
-
-
-def _extract_ea_season_name(details: dict[str, Any]) -> str:
-    meta = details.get("meta") if isinstance(details.get("meta"), dict) else {}
-    for candidate in (meta.get("title"), details.get("title")):
-        text = str(candidate or "").strip()
-        match = re.search(r"APEX\s+LEGENDS(?:™)?\s*[:：]\s*(.+)$", text, re.IGNORECASE)
-        if not match:
-            continue
-        name = match.group(1).strip(" .")
-        return name.title() if name.isupper() else name
-
-    slug = str(details.get("slug") or "").strip(" -")
-    return slug.replace("-", " ").title()
-
-
-def _build_ea_season_info(
-    detail_html: str,
-    *,
-    season_url: str,
-    now: datetime | None = None,
-) -> SeasonInfo:
-    details = _extract_ea_season_details(detail_html)
-    background_video = (
-        details.get("backgroundVideo")
-        if isinstance(details.get("backgroundVideo"), dict)
-        else {}
-    )
-    start_iso = _normalize_season_boundary_to_beijing_one(
-        str(details.get("startDate") or background_video.get("publishingDate") or "")
-    )
-    end_iso = _normalize_season_boundary_to_beijing_one(
-        str(details.get("endDate") or "")
-    )
-    season_number = _extract_ea_season_number(details)
-    season_name = _extract_ea_season_name(details)
-    if season_number is None:
-        raise RuntimeError("无法从 EA 官方赛季页提取赛季编号")
-    if not season_name:
-        raise RuntimeError("无法从 EA 官方赛季页提取赛季名称")
-
-    return SeasonInfo(
-        season_number=season_number,
-        season_name=season_name,
-        start_date=_format_iso_date(start_iso) if start_iso else "未知",
-        end_date=_format_iso_date(end_iso) if end_iso else "未知",
-        timezone="北京时间 (UTC+8)",
-        update_time_hint="北京时间 01:00",
-        source="ea.com",
-        season_url=season_url,
-        start_iso=start_iso,
-        end_iso=end_iso,
-        status_text=_resolve_season_status(start_iso, end_iso, now=now),
-    )
-
-
-def _extract_season_references(home_html: str) -> list[_SeasonReference]:
-    references: list[_SeasonReference] = []
-    for item in _extract_jsonld_items(home_html):
-        if item.get("@type") != "ItemList":
-            continue
-        for element in item.get("itemListElement") or []:
-            if not isinstance(element, dict):
-                continue
-            number, name = _parse_season_name(str(element.get("name", "")))
-            if number is None or not name:
-                continue
-            position = _to_int(element.get("position")) or 0
-            season_url = urljoin(APEX_SEASONS_HOME_URL, str(element.get("url", "")))
-            references.append(
-                _SeasonReference(
-                    season_number=number,
-                    season_name=name,
-                    season_url=season_url,
-                    position=position,
-                )
-            )
-
-    if references:
-        deduped: dict[int, _SeasonReference] = {}
-        for item in sorted(
-            references,
-            key=lambda value: (value.position or 9999, -(value.season_number or 0)),
-        ):
-            if item.season_number is None:
-                continue
-            deduped.setdefault(item.season_number, item)
-        return list(deduped.values())
-
-    number, name, season_url = _extract_current_season_identity(home_html)
-    if number is None:
-        return []
-    return [
-        _SeasonReference(
-            season_number=number,
-            season_name=name,
-            season_url=season_url,
-            position=1,
-        )
-    ]
-
-
-def _extract_current_season_identity(html: str) -> tuple[int | None, str, str]:
-    plain_text = _html_to_text(html)
-    match = SEASON_LIVE_RE.search(plain_text) or SEASON_STARTED_RE.search(plain_text)
-    if not match:
-        return None, "", ""
-    number = _to_int(match.group(1))
-    name = match.group(2).strip()
-    return number, name, ""
-
-
-def _parse_season_name(text: str) -> tuple[int | None, str]:
-    match = SEASON_NAME_RE.search(text)
-    if not match:
-        return None, ""
-    number = _to_int(match.group(1))
-    name = unescape(match.group(2)).strip()
-    return number, name
-
-
 def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
     if value is None:
         return None
@@ -2526,6 +2148,19 @@ def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
 
 
 def _normalize_season_boundary_to_beijing_one(value: str) -> str:
+    """把分段边界时刻对齐到北京时间凌晨 1 点。
+
+    ⚠️ 请勿“修正”成按太平洋时间换算 —— 这是刻意为之，不是时区处理疏漏。
+
+    国服的实际节奏是：北京时间周三 **00:30 关闭排位**，**01:00 完成更新**。
+    对国内玩家而言，“分段何时切换”这个问题的答案恒定是周三凌晨 1 点，
+    不随美国夏令时在 01:00 / 02:00 之间摆动。ALS 返回的时间戳锚定的是
+    美西 10:00（夏令时 = 北京 01:00，冬令时 = 北京 02:00），所以冬令时期间
+    直接展示原始值会和国服玩家的实际体感差 1 小时。
+
+    因此这里统一压到北京 01:00：日期取 ALS 的权威值，钟点取国服口径。
+    参见提交 b30150f「修正赛季更新时间为北京时间凌晨一点」。
+    """
     normalized = str(value or "").strip()
     if not normalized or "T" not in normalized:
         return normalized
@@ -2564,45 +2199,6 @@ def _require_allowed_https_url(
     return normalized_url
 
 
-def _build_season_info(
-    reference: _SeasonReference,
-    home_html: str,
-    detail_html: str,
-) -> SeasonInfo:
-    detail = detail_html or home_html
-    start_iso, end_iso = _extract_event_dates_from_jsonld(detail)
-    if not end_iso:
-        end_iso = _extract_countdown_target(detail) or _extract_countdown_target(home_html) or ""
-    start_iso = _normalize_season_boundary_to_beijing_one(start_iso or "")
-    end_iso = _normalize_season_boundary_to_beijing_one(end_iso or "")
-    timezone_text = _extract_timezone(home_html) or _extract_timezone(detail)
-    update_time_hint = _extract_update_time_hint(home_html)
-
-    start_date = _format_iso_date(start_iso) if start_iso else "未知"
-    end_date = _format_iso_date(end_iso) if end_iso else "未知"
-    if start_date == "未知" or end_date == "未知":
-        fallback_start, fallback_end = _extract_date_range(detail)
-        if fallback_start and start_date == "未知":
-            start_date = fallback_start
-        if fallback_end and end_date == "未知":
-            end_date = fallback_end
-
-    season_info = SeasonInfo(
-        season_number=reference.season_number,
-        season_name=reference.season_name,
-        start_date=start_date,
-        end_date=end_date,
-        timezone=timezone_text or ("UTC" if start_iso.endswith("Z") else "未知"),
-        update_time_hint=update_time_hint or "未知",
-        source="apexseasons.online",
-        season_url=reference.season_url,
-        start_iso=start_iso,
-        end_iso=end_iso,
-        status_text=_resolve_season_status(start_iso, end_iso),
-    )
-    return season_info
-
-
 def _require_complete_season_range(
     season_info: SeasonInfo,
 ) -> tuple[datetime, datetime]:
@@ -2625,93 +2221,86 @@ def _require_complete_season_range(
     return start, end
 
 
-def _apply_ranked_split_details(
-    season_info: SeasonInfo,
-    split_index: dict[int, list[_SplitTextRange]],
+def _parse_ranked_split_window(payload: Any) -> _RankedSplitWindow | None:
+    """从 /bridge 响应里解析当前排位分段窗口。
+
+    只认 `global.rank`（大逃杀排位）。`global.arena` 也有 rankedSeason，
+    但那是已废弃的竞技场模式，且不带 rankedSeasonMeta。
+    """
+    if not isinstance(payload, dict):
+        return None
+    section = payload.get("global")
+    if not isinstance(section, dict):
+        return None
+    rank = section.get("rank")
+    if not isinstance(rank, dict):
+        return None
+
+    match = RANKED_SEASON_ID_RE.match(str(rank.get("rankedSeason") or "").strip())
+    meta = rank.get("rankedSeasonMeta")
+    if match is None or not isinstance(meta, dict):
+        return None
+
+    season_number = _to_int(match.group("season"))
+    split_index = _to_int(match.group("split"))
+    start_ts = _to_int(meta.get("start"))
+    end_ts = _to_int(meta.get("end"))
+    if season_number is None or split_index is None:
+        return None
+    if not start_ts or not end_ts or end_ts <= start_ts:
+        return None
+
+    try:
+        start = datetime.fromtimestamp(start_ts, timezone.utc)
+        end = datetime.fromtimestamp(end_ts, timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        # 越界的时间戳（例如接口哪天改成毫秒纪元）不该把整个查询打崩，
+        # 按「拿不到分段」处理即可。
+        return None
+
+    return _RankedSplitWindow(
+        season_number=season_number,
+        split_index=split_index,
+        ranked_season_id=str(rank.get("rankedSeason") or "").strip(),
+        start=start,
+        end=end,
+    )
+
+
+def _split_stage_name(split_index: int | None) -> str:
+    if split_index == 1:
+        return "上半赛季"
+    if split_index == 2:
+        return "下半赛季"
+    if split_index:
+        return f"第 {split_index} 分段"
+    return "当前分段"
+
+
+def _build_season_info_from_split(
+    window: _RankedSplitWindow,
     now: datetime | None = None,
-) -> None:
-    season_info.status_text = _resolve_season_status(
-        season_info.start_iso,
-        season_info.end_iso,
-        now=now,
+) -> SeasonInfo:
+    # 日期取 ALS 权威值，钟点压到国服口径的北京 01:00，理由见
+    # _normalize_season_boundary_to_beijing_one 的说明。
+    start_iso = _normalize_season_boundary_to_beijing_one(_to_iso_datetime(window.start))
+    end_iso = _normalize_season_boundary_to_beijing_one(_to_iso_datetime(window.end))
+    stage_name = _split_stage_name(window.split_index)
+
+    season_info = SeasonInfo(
+        season_number=window.season_number,
+        split_index=window.split_index,
+        ranked_season_id=window.ranked_season_id,
+        start_iso=start_iso,
+        end_iso=end_iso,
+        start_date=_format_iso_date(start_iso),
+        end_date=_format_iso_date(end_iso),
+        status_text=_resolve_season_status(start_iso, end_iso, now=now),
+        current_split_label=stage_name,
+        split_note="分段时间来自游戏内排位数据，精确到分钟。",
     )
-    if not _season_uses_ranked_splits(season_info.season_number):
-        season_info.supports_ranked_splits = False
-        season_info.split_source = "赛制规则"
-        season_info.split_note = "该赛季没有上下半赛季排位重置。"
-        return
-
-    season_start = _parse_iso_datetime(season_info.start_iso)
-    season_end = _parse_iso_datetime(season_info.end_iso)
-    if season_start is None or season_end is None or season_end <= season_start:
-        season_info.supports_ranked_splits = False
-        season_info.split_source = "未知"
-        season_info.split_note = "缺少可信的赛季起止时间，无法计算上下半赛季。"
-        return
-
-    boundary = _resolve_split_boundary(
-        season_info.season_number,
-        split_index,
-        season_start,
-        season_end,
-    )
-    if boundary is not None:
-        boundary_dt = boundary.boundary
-        boundary_note = boundary.note
-        split_source = boundary.source
-        exact = boundary.exact
-    else:
-        boundary_dt = _infer_split_boundary(season_start, season_end)
-        if boundary_dt is None:
-            season_info.supports_ranked_splits = False
-            season_info.split_source = "未知"
-            season_info.split_note = "无法推导上下半赛季的分界时间。"
-            return
-        boundary_note = "下半赛季分界按完整赛季中点后首个北京时间周三 01:00 推测，可能不完全准确。"
-        split_source = "推导"
-        exact = False
-
-    season_info.supports_ranked_splits = True
-    season_info.split_source = split_source
-    season_info.split_note = boundary_note
-    season_info.splits = [
-        SeasonSplitInfo(
-            index=1,
-            label="Split 1",
-            stage_name="上半赛季",
-            start_iso=_to_iso_datetime(season_start),
-            end_iso=_to_iso_datetime(boundary_dt),
-            start_date=_format_iso_date(_to_iso_datetime(season_start)),
-            end_date=_format_iso_date(_to_iso_datetime(boundary_dt)),
-            source=split_source,
-            exact=exact,
-            note=boundary_note,
-        ),
-        SeasonSplitInfo(
-            index=2,
-            label="Split 2",
-            stage_name="下半赛季",
-            start_iso=_to_iso_datetime(boundary_dt),
-            end_iso=_to_iso_datetime(season_end),
-            start_date=_format_iso_date(_to_iso_datetime(boundary_dt)),
-            end_date=_format_iso_date(_to_iso_datetime(season_end)),
-            source=split_source,
-            exact=exact,
-            note=boundary_note,
-        ),
-    ]
     _update_current_split_state(season_info, now=now)
-
-
-def _extract_event_dates_from_jsonld(html: str) -> tuple[str | None, str | None]:
-    for item in _extract_jsonld_items(html):
-        if item.get("@type") != "Event":
-            continue
-        start = item.get("startDate")
-        end = item.get("endDate")
-        if isinstance(start, str) or isinstance(end, str):
-            return str(start or ""), str(end or "")
-    return None, None
+    return season_info
 
 
 def _format_iso_date(value: str) -> str:
@@ -2726,300 +2315,6 @@ def _format_iso_date(value: str) -> str:
         return dt.strftime("%Y-%m-%d %H:%M 北京时间")
     except Exception:
         return value
-
-
-def _clean_timezone(value: str) -> str:
-    tz = unescape(value).strip()
-    tz = tz.replace("<!-- -->", " ")
-    tz = tz.lstrip("·").strip()
-    tz = re.sub(r"\s+", " ", tz).strip()
-    return tz or "未知"
-
-
-def _extract_countdown_target(html: str) -> str | None:
-    match = COUNTDOWN_ARRAY_RE.search(html)
-    if match:
-        return match.group(1).strip()
-    match = COUNTDOWN_STRING_RE.search(html)
-    if match:
-        return match.group(1).strip()
-    return None
-
-
-def _extract_date(html: str, label: str) -> str | None:
-    match = re.search(
-        rf"{re.escape(label)}\s*:?\s*([A-Za-z]{{3,9}}\s+\d{{1,2}},?\s+\d{{4}})",
-        _html_to_text(html),
-        re.IGNORECASE,
-    )
-    if match:
-        return match.group(1).strip()
-    return None
-
-
-def _extract_timezone(html: str) -> str:
-    plain_text = _html_to_text(html)
-    match = TIMEZONE_RE.search(plain_text)
-    if not match:
-        return "未知"
-    return _clean_timezone(match.group(1))
-
-
-def _extract_update_time_hint(html: str) -> str:
-    plain_text = _html_to_text(html)
-    match = UPDATE_HINT_RE.search(plain_text)
-    if not match:
-        return "未知"
-    return re.sub(r"\s+", " ", match.group(1)).strip()
-
-
-def _extract_date_range(html: str) -> tuple[str, str]:
-    plain_text = _html_to_text(html)
-    match = DATE_RANGE_RE.search(plain_text)
-    if not match:
-        return "", ""
-    return match.group(1).strip(), match.group(2).strip()
-
-
-def _html_to_text(html: str) -> str:
-    text = re.sub(r"(?is)<script.*?</script>", " ", html or "")
-    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
-    text = re.sub(r"(?i)</(p|li|h\d|tr|td|th|ul|ol|section|div)>", "\n", text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = unescape(text).replace("\xa0", " ")
-    text = re.sub(r"[ \t\r\f\v]+", " ", text)
-    text = re.sub(r"\n\s+", "\n", text)
-    text = re.sub(r"\n{2,}", "\n", text)
-    return text.strip()
-
-
-def _parse_split_index_from_esportstales(html: str) -> dict[int, list[_SplitTextRange]]:
-    index: dict[int, list[_SplitTextRange]] = {}
-    for section in SEASON_SECTION_RE.finditer(html or ""):
-        season_number = _to_int(section.group("number"))
-        if season_number is None:
-            continue
-        body_text = _html_to_text(section.group("body"))
-        ranges: list[_SplitTextRange] = []
-        for match in SPLIT_LINE_RE.finditer(body_text):
-            if _to_int(match.group("number")) != season_number:
-                continue
-            split_number = _to_int(match.group("split"))
-            if split_number not in {1, 2}:
-                continue
-            ranges.append(
-                _SplitTextRange(
-                    index=split_number,
-                    start_text=match.group("start").strip(),
-                    end_text=match.group("end").strip(),
-                )
-            )
-        if ranges:
-            index[season_number] = sorted(ranges, key=lambda item: item.index)
-    return index
-
-
-def _resolve_split_boundary(
-    season_number: int | None,
-    split_index: dict[int, list[_SplitTextRange]],
-    season_start: datetime,
-    season_end: datetime,
-) -> _SplitBoundaryResolution | None:
-    if season_number is None:
-        return None
-    ranges = split_index.get(season_number)
-    if not ranges:
-        return None
-
-    midpoint = season_start + ((season_end - season_start) / 2)
-    exact_candidates: list[datetime] = []
-    date_only_candidates: list[datetime] = []
-    for item in ranges:
-        if item.index == 1:
-            value = _resolve_partial_date(item.end_text, season_start, season_end, midpoint)
-        else:
-            value = _resolve_partial_date(item.start_text, season_start, season_end, midpoint)
-        if value is None:
-            continue
-        if value.tzinfo is not None:
-            if season_start < value < season_end:
-                exact_candidates.append(value)
-            continue
-
-        inferred = _infer_split_boundary_from_source_date(value, season_start, season_end)
-        if inferred is not None and season_start < inferred < season_end:
-            date_only_candidates.append(inferred)
-
-    if exact_candidates:
-        boundary = min(
-            exact_candidates,
-            key=lambda value: abs((value - midpoint).total_seconds()),
-        )
-        return _SplitBoundaryResolution(
-            boundary=boundary,
-            source="esportstales.com",
-            note="来自 Esports Tales 的公开 split 时间表。",
-            exact=True,
-        )
-
-    if not date_only_candidates:
-        return None
-
-    boundary = min(
-        date_only_candidates,
-        key=lambda value: abs((value - midpoint).total_seconds()),
-    )
-    return _SplitBoundaryResolution(
-        boundary=boundary,
-        source="esportstales.com",
-        note=(
-            "日期来自 Esports Tales；网站未提供精确时刻，已按北京时间周三凌晨 1 点推导。"
-        ),
-        exact=False,
-    )
-
-
-def _resolve_partial_date(
-    text: str,
-    season_start: datetime,
-    season_end: datetime,
-    anchor: datetime,
-) -> datetime | None:
-    if not text or FUZZY_DATE_TOKEN_RE.search(text):
-        return None
-    match = MONTH_DAY_RE.search(text)
-    if not match:
-        return None
-
-    month = _month_name_to_number(match.group(1))
-    if month is None:
-        return None
-    day = _to_int(match.group(2))
-    explicit_year = _to_int(match.group(3))
-    if day is None:
-        return None
-
-    years = [explicit_year] if explicit_year is not None else list(
-        {
-            season_start.year - 1,
-            season_start.year,
-            season_end.year,
-            season_end.year + 1,
-        }
-    )
-
-    season_start_date = season_start.astimezone(SHANGHAI_TZ).date()
-    season_end_date = season_end.astimezone(SHANGHAI_TZ).date()
-    anchor_local = anchor.astimezone(SHANGHAI_TZ).replace(tzinfo=None)
-
-    candidates: list[datetime] = []
-    for year in years:
-        if year is None:
-            continue
-        try:
-            candidate = datetime(year, month, day)
-        except ValueError:
-            continue
-        if season_start_date - timedelta(days=14) <= candidate.date() <= season_end_date + timedelta(days=14):
-            candidates.append(candidate)
-
-    if not candidates:
-        return None
-    return min(candidates, key=lambda value: abs((value - anchor_local).total_seconds()))
-
-
-def _infer_split_boundary(season_start: datetime, season_end: datetime) -> datetime | None:
-    if season_end <= season_start:
-        return None
-
-    midpoint_local = (
-        season_start + ((season_end - season_start) / 2)
-    ).astimezone(SHANGHAI_TZ)
-    days_until_wednesday = (2 - midpoint_local.weekday()) % 7
-    candidate_date = midpoint_local.date() + timedelta(days=days_until_wednesday)
-    candidate_local = datetime(
-        candidate_date.year,
-        candidate_date.month,
-        candidate_date.day,
-        1,
-        0,
-        tzinfo=SHANGHAI_TZ,
-    )
-    if candidate_local < midpoint_local:
-        candidate_local += timedelta(days=7)
-
-    candidate_utc = candidate_local.astimezone(timezone.utc)
-    if not season_start < candidate_utc < season_end:
-        return None
-    return candidate_utc
-
-
-def _infer_split_boundary_from_source_date(
-    source_date: datetime,
-    season_start: datetime,
-    season_end: datetime,
-) -> datetime | None:
-    anchor = datetime(
-        source_date.year,
-        source_date.month,
-        source_date.day,
-        0,
-        0,
-        tzinfo=SHANGHAI_TZ,
-    )
-    return _nearest_beijing_update_boundary(anchor, season_start, season_end)
-
-
-def _nearest_beijing_update_boundary(
-    anchor: datetime,
-    season_start: datetime,
-    season_end: datetime,
-) -> datetime | None:
-    if season_end <= season_start:
-        return None
-
-    anchor_local = anchor.astimezone(SHANGHAI_TZ)
-    season_start_local = season_start.astimezone(SHANGHAI_TZ)
-    season_end_local = season_end.astimezone(SHANGHAI_TZ)
-
-    start_date = season_start_local.date() - timedelta(days=7)
-    end_date = season_end_local.date() + timedelta(days=7)
-    total_days = (end_date - start_date).days
-    candidates: list[datetime] = []
-
-    for offset in range(total_days + 1):
-        day = start_date + timedelta(days=offset)
-        if day.weekday() != 2:
-            continue
-        candidate_local = datetime(
-            day.year,
-            day.month,
-            day.day,
-            1,
-            0,
-            tzinfo=SHANGHAI_TZ,
-        )
-        candidate_utc = candidate_local.astimezone(timezone.utc)
-        if season_start < candidate_utc < season_end:
-            candidates.append(candidate_utc)
-
-    if not candidates:
-        return None
-
-    return min(
-        candidates,
-        key=lambda value: abs((value.astimezone(SHANGHAI_TZ) - anchor_local).total_seconds()),
-    )
-
-
-def _season_uses_ranked_splits(season_number: int | None) -> bool:
-    if season_number is None:
-        return True
-    if season_number < 4:
-        return False
-    if 17 <= season_number <= 19:
-        return False
-    return True
 
 
 def _resolve_season_status(
@@ -3043,43 +2338,30 @@ def _update_current_split_state(
     season_info: SeasonInfo,
     now: datetime | None = None,
 ) -> None:
-    if not season_info.splits:
-        if not season_info.supports_ranked_splits:
-            season_info.current_split_label = ""
-        season_info.current_split_index = None
+    now_dt = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
+    start = _parse_iso_datetime(season_info.start_iso)
+    end = _parse_iso_datetime(season_info.end_iso)
+    stage_name = _split_stage_name(season_info.split_index)
+
+    if start is None or end is None:
         season_info.next_transition_label = ""
         season_info.next_transition_iso = ""
         return
 
-    now_dt = _coerce_utc_datetime(now) or datetime.now(timezone.utc)
-    split_one, split_two = season_info.splits
-    split_one_start = _parse_iso_datetime(split_one.start_iso)
-    split_one_end = _parse_iso_datetime(split_one.end_iso)
-    split_two_end = _parse_iso_datetime(split_two.end_iso)
-    if not split_one_start or not split_one_end or not split_two_end:
-        return
-
-    if now_dt < split_one_start:
+    if now_dt < start:
         season_info.current_split_label = "未开始"
-        season_info.current_split_index = None
-        season_info.next_transition_label = "上半赛季开始"
-        season_info.next_transition_iso = split_one.start_iso
-        return
-    if now_dt < split_one_end:
-        season_info.current_split_label = split_one.stage_name
-        season_info.current_split_index = split_one.index
-        season_info.next_transition_label = "下半赛季开始"
-        season_info.next_transition_iso = split_one.end_iso
-        return
-    if now_dt < split_two_end:
-        season_info.current_split_label = split_two.stage_name
-        season_info.current_split_index = split_two.index
-        season_info.next_transition_label = "赛季结束"
-        season_info.next_transition_iso = split_two.end_iso
+        season_info.next_transition_label = f"{stage_name}开始"
+        season_info.next_transition_iso = season_info.start_iso
         return
 
-    season_info.current_split_label = "赛季已结束"
-    season_info.current_split_index = None
+    if now_dt < end:
+        season_info.current_split_label = stage_name
+        season_info.next_transition_label = f"{stage_name}结束"
+        season_info.next_transition_iso = season_info.end_iso
+        return
+
+    # 分段已过期：ALS 还没翻页时会短暂出现这种状态。
+    season_info.current_split_label = f"{stage_name}已结束"
     season_info.next_transition_label = ""
     season_info.next_transition_iso = ""
 
@@ -3101,11 +2383,17 @@ def _to_iso_datetime(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _month_name_to_number(value: str) -> int | None:
-    try:
-        return datetime.strptime(value[:3], "%b").month
-    except Exception:
-        return None
+def _html_to_text(html: str) -> str:
+    """把 HTML 压成纯文本。目前仅用于把接口返回的 HTML 错误页转成可读信息。"""
+    text = re.sub(r"(?is)<script.*?</script>", " ", html or "")
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</(p|li|h\d|tr|td|th|ul|ol|section|div)>", "\n", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = unescape(text).replace("\xa0", " ")
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r"\n\s+", "\n", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+    return text.strip()
 
 
 def _extract_response_error_message(response: httpx.Response | None) -> str:

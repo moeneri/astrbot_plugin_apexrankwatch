@@ -1,34 +1,23 @@
-import asyncio
-import json
-from datetime import datetime, timezone
+"""赛季分段（split）时间的单元测试。
 
-import httpx
+数据源只有一个：ALS `/bridge` 的 `global.rank.rankedSeasonMeta`。
+本文件不再包含任何第三方网页抓取相关的测试 —— 那些代码已整体移除。
+"""
+
+import asyncio
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 import apex_service
+from utils import SHANGHAI_TZ
 
 
-def _client_with_pages(
-    pages: dict[str, str],
-    requested_urls: list[str] | None = None,
-):
-    client = object.__new__(apex_service.ApexApiClient)
-    client._logger = _SilentLogger()
-    client._season_cache_ttl_seconds = 1800
-    client._season_cache = {}
-    client._season_lock = asyncio.Lock()
-    client._split_index_cache = None
-
-    async def request_text(url: str, **_kwargs) -> str:
-        if requested_urls is not None:
-            requested_urls.append(url)
-        result = pages[url]
-        if isinstance(result, Exception):
-            raise result
-        return result
-
-    client._request_text_with_retry = request_text
-    return client
+# S30 上半赛季的真实 ALS 返回值（2026-08 实网抓取）。
+# start = 2026-08-04 17:00Z = 北京 08-05 01:00 周三
+# end   = 2026-09-15 17:00Z = 北京 09-16 01:00 周三
+S30_SPLIT1_START = 1785862800
+S30_SPLIT1_END = 1789491600
 
 
 class _SilentLogger:
@@ -36,956 +25,451 @@ class _SilentLogger:
         return lambda *_args, **_kwargs: None
 
 
-def _http_status_error(url: str, status_code: int) -> httpx.HTTPStatusError:
-    request = httpx.Request("GET", url)
-    response = httpx.Response(status_code, request=request)
-    return httpx.HTTPStatusError(
-        f"HTTP {status_code}",
-        request=request,
-        response=response,
-    )
-
-
-def _season_with_range(start_iso: str, end_iso: str):
-    return apex_service.SeasonInfo(
-        season_number=29,
-        season_name="Overclocked",
-        start_date="test",
-        end_date="test",
-        timezone="UTC",
-        update_time_hint="test",
-        source="apexseasons.online",
-        season_url="https://apexseasons.online/seasons/season-29/",
-        start_iso=start_iso,
-        end_iso=end_iso,
-    )
-
-
-def _ea_home_html(season_url: str) -> str:
-    return f'<a href="{season_url}">Current season</a>'
-
-
-def _ea_detail_html(
-    *,
-    slug: str = "marked",
-    season_number: int = 30,
-    start_iso: str = "2026-08-04T10:00:00.000-07:00",
-    end_iso: str = "2026-11-04T08:00:00.000-07:00",
-) -> str:
-    payload = {
-        "props": {
-            "pageProps": {
-                "seasonDetailsFallback": {
-                    "slug": slug,
-                    "title": f"APEX LEGENDS™: {slug.upper()}",
-                    "endDate": end_iso,
-                    "meta": {
-                        "title": f"APEX LEGENDS™: {slug.upper()}",
-                        "image": {
-                            "alternateText": (
-                                f"Apex Legends key art for season {season_number}: "
-                                f"{slug.title()}."
-                            )
-                        },
-                    },
-                    "backgroundVideo": {
-                        "name": f"APEX-S{season_number}_Gameplay_hero-bg",
-                        "publishingDate": start_iso,
-                    },
-                }
-            }
+def _bridge_payload(
+    ranked_season: str = "br_ranked_s30_s1",
+    start: int | None = S30_SPLIT1_START,
+    end: int | None = S30_SPLIT1_END,
+    include_meta: bool = True,
+):
+    rank: dict = {"rankScore": 5771, "rankName": "Gold", "rankedSeason": ranked_season}
+    if include_meta:
+        rank["rankedSeasonMeta"] = {"start": start, "end": end}
+    return {
+        "global": {
+            "name": "MoeNerii",
+            "rank": rank,
+            # 竞技场是废弃模式，且不带 Meta：解析必须忽略它。
+            "arena": {"rankedSeason": "arenas29_split_2"},
         }
     }
-    return (
-        '<script id="__NEXT_DATA__" type="application/json">'
-        + json.dumps(payload)
-        + "</script>"
-    )
 
 
-def test_fixed_beijing_one_boundary_is_not_shifted_again():
-    assert (
-        apex_service._normalize_season_boundary_to_beijing_one(
-            "2026-08-04T17:00:00Z"
+def _client(payload=None, calls: list | None = None):
+    client = object.__new__(apex_service.ApexApiClient)
+    client._logger = _SilentLogger()
+    client._api_key = "test-key"
+    client._season_cache_ttl_seconds = 1800
+    client._season_cache = {}
+    client._season_lock = asyncio.Lock()
+    client._season_probe_player = "moeneri"
+    client._season_probe_cooldown_seconds = 0  # 测试默认关闭冷却
+    client._last_season_probe = None
+
+    async def request_player_data(_url, params, _ident):
+        if calls is not None:
+            calls.append(params.get("player"))
+        if isinstance(payload, Exception):
+            raise payload
+        return payload
+
+    client._request_player_data = request_player_data
+    return client
+
+
+def _beijing(iso: str) -> datetime:
+    return apex_service._parse_iso_datetime(iso).astimezone(SHANGHAI_TZ)
+
+
+# --------------------------------------------------------------------------
+# _parse_ranked_split_window
+# --------------------------------------------------------------------------
+
+
+def test_parses_ranked_season_meta_into_window():
+    window = apex_service._parse_ranked_split_window(_bridge_payload())
+    assert window is not None
+    assert window.season_number == 30
+    assert window.split_index == 1
+    assert window.ranked_season_id == "br_ranked_s30_s1"
+    assert window.start == datetime(2026, 8, 4, 17, 0, tzinfo=timezone.utc)
+    assert window.end == datetime(2026, 9, 15, 17, 0, tzinfo=timezone.utc)
+
+
+def test_parses_split_two_and_legacy_id_forms():
+    for ranked_season, season, split in (
+        ("br_ranked_s30_s2", 30, 2),
+        ("season30_split1", 30, 1),
+        ("S31_S2", 31, 2),
+    ):
+        window = apex_service._parse_ranked_split_window(
+            _bridge_payload(ranked_season=ranked_season)
         )
-        == "2026-08-04T17:00:00Z"
-    )
-
-
-def test_current_season_falls_back_to_ea_when_countdown_site_is_stale():
-    stale_url = "https://apexseasons.online/seasons/season-29-overclocked/"
-    ea_season_url = (
-        "https://www.ea.com/games/apex-legends/apex-legends/seasons/marked"
-    )
-    home_html = f'''<script type="application/ld+json">{{
-      "@type": "ItemList",
-      "itemListElement": [{{
-        "position": 1,
-        "name": "Season 29 Overclocked",
-        "url": "{stale_url}"
-      }}]
-    }}</script>'''
-    stale_html = '''<script type="application/ld+json">{
-      "@type": "Event",
-      "startDate": "2026-05-05T18:00:00Z",
-      "endDate": "2026-08-04T18:00:00Z"
-    }</script>'''
-    requested_urls: list[str] = []
-    client = _client_with_pages(
-        {
-            apex_service.APEX_SEASONS_HOME_URL: home_html,
-            stale_url: stale_html,
-            apex_service.EA_APEX_HOME_URL: _ea_home_html(ea_season_url),
-            ea_season_url: _ea_detail_html(),
-        },
-        requested_urls,
-    )
-
-    season = asyncio.run(
-        client.fetch_current_season_info(
-            now=datetime(2026, 8, 9, tzinfo=timezone.utc),
-        )
-    )
-
-    assert season.season_number == 30
-    assert season.season_name == "Marked"
-    assert season.start_iso == "2026-08-04T17:00:00Z"
-    assert season.end_iso == "2026-11-03T17:00:00Z"
-    assert season.start_date == "2026-08-05 01:00 北京时间"
-    assert season.end_date == "2026-11-04 01:00 北京时间"
-    assert season.status_text == "进行中"
-    assert season.source == "ea.com"
-    assert season.season_url == ea_season_url
-    assert season.supports_ranked_splits is True
-    assert season.split_source == "推导"
-    assert requested_urls == [
-        apex_service.APEX_SEASONS_HOME_URL,
-        stale_url,
-        apex_service.EA_APEX_HOME_URL,
-        ea_season_url,
-    ]
-
-
-def test_ea_fallback_rejects_season_range_that_does_not_include_now():
-    ea_season_url = (
-        "https://www.ea.com/games/apex-legends/apex-legends/seasons/marked"
-    )
-    client = _client_with_pages(
-        {
-            apex_service.EA_APEX_HOME_URL: _ea_home_html(ea_season_url),
-            ea_season_url: _ea_detail_html(),
-        }
-    )
-
-    with pytest.raises(RuntimeError, match="包含当前时间"):
-        asyncio.run(
-            client._fetch_current_season_from_ea(
-                now=datetime(2027, 1, 1, tzinfo=timezone.utc),
-            )
-        )
-
-
-def test_ea_current_season_link_rejects_unapproved_host():
-    unsafe_home = (
-        '<a href="https://example.com/games/apex-legends/apex-legends/'
-        'seasons/marked">Current season</a>'
-    )
-
-    with pytest.raises(RuntimeError, match="URL"):
-        apex_service._extract_ea_current_season_url(unsafe_home)
-
-
-def test_current_season_uses_complete_apexseasons_range():
-    detail_url = "https://apexseasons.online/seasons/season-29-overclocked/"
-    home_html = f'''<script type="application/ld+json">{{
-      "@context": "https://schema.org",
-      "@type": "ItemList",
-      "itemListElement": [{{
-        "@type": "ListItem",
-        "position": 1,
-        "name": "Season 29 Overclocked",
-        "url": "{detail_url}"
-      }}]
-    }}</script>'''
-    detail_html = '''<script type="application/ld+json">{
-      "@context": "https://schema.org",
-      "@type": "Event",
-      "name": "Apex Legends Season 29 Overclocked",
-      "startDate": "2026-05-05T18:00:00Z",
-      "endDate": "2026-08-04T18:00:00Z"
-    }</script>'''
-    client = _client_with_pages(
-        {
-            apex_service.APEX_SEASONS_HOME_URL: home_html,
-            detail_url: detail_html,
-        }
-    )
-
-    season = asyncio.run(
-        client.fetch_current_season_info(
-            now=datetime(2026, 7, 10, tzinfo=timezone.utc),
-        )
-    )
-
-    assert season.season_number == 29
-    assert season.season_name == "Overclocked"
-    assert season.start_iso == "2026-05-05T17:00:00Z"
-    assert season.end_iso == "2026-08-04T17:00:00Z"
-    assert season.start_date == "2026-05-06 01:00 北京时间"
-    assert season.end_date == "2026-08-05 01:00 北京时间"
-    assert season.end_iso != "2026-09-22T17:00:00Z"
-    assert season.source == "apexseasons.online"
-    assert season.supports_ranked_splits is True
-    assert season.split_source == "推导"
-    assert all(split_info.exact is False for split_info in season.splits)
-    assert season.splits[1].start_iso == "2026-06-23T17:00:00Z"
-
-
-def test_private_current_fetch_accepts_injected_now():
-    detail_url = "https://apexseasons.online/seasons/season-29-overclocked/"
-    home_html = f'''<script type="application/ld+json">{{
-      "@type": "ItemList",
-      "itemListElement": [{{
-        "position": 1,
-        "name": "Season 29 Overclocked",
-        "url": "{detail_url}"
-      }}]
-    }}</script>'''
-    detail_html = '''<script type="application/ld+json">{
-      "@type": "Event",
-      "startDate": "2026-05-05T18:00:00Z",
-      "endDate": "2026-08-04T18:00:00Z"
-    }</script>'''
-    client = _client_with_pages(
-        {
-            apex_service.APEX_SEASONS_HOME_URL: home_html,
-            detail_url: detail_html,
-        }
-    )
-
-    season = asyncio.run(
-        client._fetch_season_from_apexseasons(
-            None,
-            use_public_split_index=False,
-            now=datetime(2026, 6, 10, tzinfo=timezone.utc),
-        )
-    )
-
-    assert season.season_number == 29
-    assert season.status_text == "进行中"
-    assert season.current_split_label == "上半赛季"
-
-
-def test_current_fetch_skips_upcoming_first_reference():
-    upcoming_url = "https://apexseasons.online/seasons/season-30/"
-    current_url = "https://apexseasons.online/seasons/season-29/"
-    home_html = f'''<script type="application/ld+json">{{
-      "@type": "ItemList",
-      "itemListElement": [
-        {{
-          "position": 1,
-          "name": "Season 30 Future Shock",
-          "url": "{upcoming_url}"
-        }},
-        {{
-          "position": 2,
-          "name": "Season 29 Overclocked",
-          "url": "{current_url}"
-        }}
-      ]
-    }}</script>'''
-    client = _client_with_pages(
-        {
-            apex_service.APEX_SEASONS_HOME_URL: home_html,
-            upcoming_url: '''<script type="application/ld+json">{
-              "@type": "Event",
-              "startDate": "2026-08-04T18:00:00Z",
-              "endDate": "2026-11-03T18:00:00Z"
-            }</script>''',
-            current_url: '''<script type="application/ld+json">{
-              "@type": "Event",
-              "startDate": "2026-05-05T18:00:00Z",
-              "endDate": "2026-08-04T18:00:00Z"
-            }</script>''',
-        }
-    )
-
-    season = asyncio.run(
-        client._fetch_season_from_apexseasons(
-            None,
-            use_public_split_index=False,
-            now=datetime(2026, 7, 10, tzinfo=timezone.utc),
-        )
-    )
-
-    assert season.season_number == 29
-
-
-def test_current_fetch_switches_to_next_season_at_fixed_beijing_boundary():
-    upcoming_url = "https://apexseasons.online/seasons/season-30/"
-    current_url = "https://apexseasons.online/seasons/season-29/"
-    home_html = f'''<script type="application/ld+json">{{
-      "@type": "ItemList",
-      "itemListElement": [
-        {{
-          "position": 1,
-          "name": "Season 30 Future Shock",
-          "url": "{upcoming_url}"
-        }},
-        {{
-          "position": 2,
-          "name": "Season 29 Overclocked",
-          "url": "{current_url}"
-        }}
-      ]
-    }}</script>'''
-    client = _client_with_pages(
-        {
-            apex_service.APEX_SEASONS_HOME_URL: home_html,
-            upcoming_url: '''<script type="application/ld+json">{
-              "@type": "Event",
-              "startDate": "2026-08-04T18:00:00Z",
-              "endDate": "2026-11-03T18:00:00Z"
-            }</script>''',
-            current_url: '''<script type="application/ld+json">{
-              "@type": "Event",
-              "startDate": "2026-05-05T18:00:00Z",
-              "endDate": "2026-08-04T18:00:00Z"
-            }</script>''',
-        }
-    )
-
-    season = asyncio.run(
-        client._fetch_season_from_apexseasons(
-            None,
-            use_public_split_index=False,
-            now=datetime(2026, 8, 4, 17, tzinfo=timezone.utc),
-        )
-    )
-
-    assert season.season_number == 30
-    assert season.start_iso == "2026-08-04T17:00:00Z"
-    assert season.status_text == "进行中"
-
-
-def test_current_fetch_skips_stale_first_reference():
-    stale_url = "https://apexseasons.online/seasons/season-28/"
-    current_url = "https://apexseasons.online/seasons/season-29/"
-    home_html = f'''<script type="application/ld+json">{{
-      "@type": "ItemList",
-      "itemListElement": [
-        {{
-          "position": 1,
-          "name": "Season 28 Breach",
-          "url": "{stale_url}"
-        }},
-        {{
-          "position": 2,
-          "name": "Season 29 Overclocked",
-          "url": "{current_url}"
-        }}
-      ]
-    }}</script>'''
-    client = _client_with_pages(
-        {
-            apex_service.APEX_SEASONS_HOME_URL: home_html,
-            stale_url: '''<script type="application/ld+json">{
-              "@type": "Event",
-              "startDate": "2026-02-03T18:00:00Z",
-              "endDate": "2026-05-05T18:00:00Z"
-            }</script>''',
-            current_url: '''<script type="application/ld+json">{
-              "@type": "Event",
-              "startDate": "2026-05-05T18:00:00Z",
-              "endDate": "2026-08-04T18:00:00Z"
-            }</script>''',
-        }
-    )
-
-    season = asyncio.run(
-        client._fetch_season_from_apexseasons(
-            None,
-            use_public_split_index=False,
-            now=datetime(2026, 7, 10, tzinfo=timezone.utc),
-        )
-    )
-
-    assert season.season_number == 29
-
-
-def test_current_fetch_stops_after_first_expired_newest_candidate():
-    older_27_url = "https://apexseasons.online/seasons/season-27/"
-    older_28_url = "https://apexseasons.online/seasons/season-28/"
-    expired_url = "https://apexseasons.online/seasons/season-29/"
-    upcoming_url = "https://apexseasons.online/seasons/season-30/"
-    home_html = f'''<script type="application/ld+json">{{
-      "@type": "ItemList",
-      "itemListElement": [
-        {{"position": 1, "name": "Season 27 From the Rift", "url": "{older_27_url}"}},
-        {{"position": 2, "name": "Season 28 Breach", "url": "{older_28_url}"}},
-        {{"position": 3, "name": "Season 29 Overclocked", "url": "{expired_url}"}},
-        {{"position": 4, "name": "Season 30 Future Shock", "url": "{upcoming_url}"}}
-      ]
-    }}</script>'''
-    pages = {
-        apex_service.APEX_SEASONS_HOME_URL: home_html,
-        older_27_url: '''<script type="application/ld+json">{
-          "@type": "Event",
-          "startDate": "2025-11-04T18:00:00Z",
-          "endDate": "2026-02-03T18:00:00Z"
-        }</script>''',
-        older_28_url: '''<script type="application/ld+json">{
-          "@type": "Event",
-          "startDate": "2026-02-03T18:00:00Z",
-          "endDate": "2026-05-05T18:00:00Z"
-        }</script>''',
-        expired_url: '''<script type="application/ld+json">{
-          "@type": "Event",
-          "startDate": "2026-05-05T18:00:00Z",
-          "endDate": "2026-08-04T18:00:00Z"
-        }</script>''',
-        upcoming_url: '''<script type="application/ld+json">{
-          "@type": "Event",
-          "startDate": "2026-08-10T18:00:00Z",
-          "endDate": "2026-11-10T18:00:00Z"
-        }</script>''',
-    }
-    requested_urls: list[str] = []
-    client = _client_with_pages(pages, requested_urls)
-
-    try:
-        asyncio.run(
-            client._fetch_season_from_apexseasons(
-                None,
-                use_public_split_index=False,
-                now=datetime(2026, 8, 6, tzinfo=timezone.utc),
-            )
-        )
-    except RuntimeError as exc:
-        assert "完整起止时间" in str(exc)
-    else:
-        raise AssertionError("a gap between seasons must not select a range")
-
-    assert requested_urls == [
-        apex_service.APEX_SEASONS_HOME_URL,
-        upcoming_url,
-        expired_url,
-    ]
+        assert window is not None, ranked_season
+        assert (window.season_number, window.split_index) == (season, split)
 
 
 @pytest.mark.parametrize(
-    "unsafe_url",
+    "payload",
     [
-        "http://169.254.169.254/latest/meta-data/",
-        "https://example.com/seasons/season-30/",
-        "https://user:password@apexseasons.online/seasons/season-30/",
-        "https://apexseasons.online:8443/seasons/season-30/",
+        None,
+        {},
+        {"global": {}},
+        {"global": {"rank": "not-a-dict"}},
+        # 只有竞技场数据：没有 br 排位段，必须拒绝
+        {"global": {"arena": {"rankedSeason": "arenas29_split_2"}}},
     ],
 )
-def test_current_fetch_rejects_unsafe_detail_url_before_request(unsafe_url):
-    home_html = f'''<script type="application/ld+json">{json.dumps({
-      "@type": "ItemList",
-      "itemListElement": [{
-        "position": 1,
-        "name": "Season 30 Future Shock",
-        "url": unsafe_url,
-      }],
-    })}</script>'''
-    requested_urls: list[str] = []
-    detail_html = '''<script type="application/ld+json">{
-      "@type": "Event",
-      "startDate": "2026-05-05T18:00:00Z",
-      "endDate": "2026-08-04T18:00:00Z"
-    }</script>'''
-    client = _client_with_pages(
-        {
-            apex_service.APEX_SEASONS_HOME_URL: home_html,
-            unsafe_url: detail_html,
-        },
-        requested_urls,
+def test_rejects_payloads_without_ranked_section(payload):
+    assert apex_service._parse_ranked_split_window(payload) is None
+
+
+def test_rejects_missing_or_unusable_meta():
+    # 缺少 rankedSeasonMeta
+    assert apex_service._parse_ranked_split_window(
+        _bridge_payload(include_meta=False)
+    ) is None
+    # 认不出的赛季标识
+    assert apex_service._parse_ranked_split_window(
+        _bridge_payload(ranked_season="br_ranked_unknown")
+    ) is None
+    # 时间戳缺失 / 反序 / 相等
+    for start, end in ((None, S30_SPLIT1_END), (S30_SPLIT1_START, None),
+                       (S30_SPLIT1_END, S30_SPLIT1_START),
+                       (S30_SPLIT1_START, S30_SPLIT1_START), (0, 0)):
+        assert apex_service._parse_ranked_split_window(
+            _bridge_payload(start=start, end=end)
+        ) is None, (start, end)
+
+
+# --------------------------------------------------------------------------
+# 北京时间凌晨 1 点锚定（提交 b30150f 的刻意行为）
+# --------------------------------------------------------------------------
+
+
+def test_summer_split_already_lands_on_beijing_wednesday_one():
+    """夏令时期间美西 10:00 == 北京 01:00，归一化是空操作。"""
+    info = apex_service._build_season_info_from_split(
+        apex_service._parse_ranked_split_window(_bridge_payload())
+    )
+    for iso in (info.start_iso, info.end_iso):
+        local = _beijing(iso)
+        assert (local.hour, local.minute) == (1, 0)
+        assert local.weekday() == 2  # 周三
+
+
+def test_winter_boundary_is_pinned_to_beijing_one_not_two():
+    """冬令时不能顺着太平洋时间漂到北京 02:00。
+
+    这是刻意行为，不是时区 bug：国服口径恒为周三 01:00 更新
+    （00:30 关排位）。若有人“修正”成按 PT 换算，此测试必须失败。
+    """
+    # 2026-11-03 18:00Z 是美西 10:00 PST，落在北京 11-04 02:00。
+    raw = "2026-11-03T18:00:00Z"
+    assert _beijing(raw).hour == 2, "前置假设：原始值确实是北京 02:00"
+
+    fixed = apex_service._normalize_season_boundary_to_beijing_one(raw)
+    local = _beijing(fixed)
+    assert (local.hour, local.minute) == (1, 0)
+    assert local.weekday() == 2
+    assert local.date().isoformat() == "2026-11-04", "只改钟点，不改日期"
+
+
+def test_normalize_keeps_unparsable_values_untouched():
+    for value in ("", "   ", "not-a-timestamp", "2026-08-04"):
+        assert (
+            apex_service._normalize_season_boundary_to_beijing_one(value)
+            == value.strip()
+        )
+
+
+# --------------------------------------------------------------------------
+# _build_season_info_from_split
+# --------------------------------------------------------------------------
+
+
+def test_builds_season_info_fields_from_window():
+    now = datetime(2026, 8, 25, 3, 0, tzinfo=timezone.utc)
+    info = apex_service._build_season_info_from_split(
+        apex_service._parse_ranked_split_window(_bridge_payload()), now=now
+    )
+    assert info.season_number == 30
+    assert info.split_index == 1
+    assert info.ranked_season_id == "br_ranked_s30_s1"
+    assert info.source == "api.mozambiquehe.re"
+    assert info.status_text == "进行中"
+    assert info.current_split_label == "上半赛季"
+    assert info.next_transition_label == "上半赛季结束"
+    assert info.next_transition_iso == info.end_iso
+    assert info.split_note
+
+
+def test_split_two_is_labelled_lower_half():
+    info = apex_service._build_season_info_from_split(
+        apex_service._parse_ranked_split_window(
+            _bridge_payload(ranked_season="br_ranked_s30_s2")
+        ),
+        now=datetime(2026, 8, 25, 3, 0, tzinfo=timezone.utc),
+    )
+    assert info.current_split_label == "下半赛季"
+
+
+def test_s30_split_end_is_september_16_not_the_midpoint_guess():
+    """回归钉子：旧的“赛季中点后首个周三”启发式会算出 09-23，偏 7 天。
+
+    S30 赛季长 91 天（08-04 → 11-03），中点在 09-19，因此中点推测法必然
+    落到 09-23；而游戏内的真实分段边界是 09-16（北京时间）。
+    """
+    info = apex_service._build_season_info_from_split(
+        apex_service._parse_ranked_split_window(_bridge_payload())
+    )
+    assert _beijing(info.end_iso).date().isoformat() == "2026-09-16"
+    assert _beijing(info.start_iso).date().isoformat() == "2026-08-05"
+    # 分段长度恰好 6 周
+    span = apex_service._parse_iso_datetime(
+        info.end_iso
+    ) - apex_service._parse_iso_datetime(info.start_iso)
+    assert span == timedelta(days=42)
+
+
+# --------------------------------------------------------------------------
+# _update_current_split_state
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "now,expected_label,expected_transition",
+    [
+        (datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc), "未开始", "上半赛季开始"),
+        (datetime(2026, 8, 25, 3, 0, tzinfo=timezone.utc), "上半赛季", "上半赛季结束"),
+        (datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc), "上半赛季已结束", ""),
+    ],
+)
+def test_split_state_tracks_now(now, expected_label, expected_transition):
+    info = apex_service._build_season_info_from_split(
+        apex_service._parse_ranked_split_window(_bridge_payload()), now=now
+    )
+    assert info.current_split_label == expected_label
+    assert info.next_transition_label == expected_transition
+
+
+def test_boundary_instants_are_inclusive_at_start_exclusive_at_end():
+    window = apex_service._parse_ranked_split_window(_bridge_payload())
+    start = apex_service._parse_iso_datetime(
+        apex_service._normalize_season_boundary_to_beijing_one(
+            apex_service._to_iso_datetime(window.start)
+        )
+    )
+    end = apex_service._parse_iso_datetime(
+        apex_service._normalize_season_boundary_to_beijing_one(
+            apex_service._to_iso_datetime(window.end)
+        )
+    )
+    at_start = apex_service._build_season_info_from_split(window, now=start)
+    at_end = apex_service._build_season_info_from_split(window, now=end)
+    assert at_start.current_split_label == "上半赛季"
+    assert at_end.current_split_label == "上半赛季已结束"
+
+
+# --------------------------------------------------------------------------
+# 客户端取数与缓存
+# --------------------------------------------------------------------------
+
+
+def test_fetch_current_season_uses_probe_player():
+    calls: list = []
+    client = _client(_bridge_payload(), calls)
+    info = asyncio.run(
+        client.fetch_current_season_info(
+            now=datetime(2026, 8, 25, 3, 0, tzinfo=timezone.utc)
+        )
+    )
+    assert calls == ["moeneri"]
+    assert info.season_number == 30
+    assert info.split_index == 1
+
+
+def test_fetch_current_season_serves_from_cache_without_second_request():
+    calls: list = []
+    client = _client(_bridge_payload(), calls)
+    now = datetime(2026, 8, 25, 3, 0, tzinfo=timezone.utc)
+    asyncio.run(client.fetch_current_season_info(now=now))
+    asyncio.run(client.fetch_current_season_info(now=now))
+    assert calls == ["moeneri"], "第二次应命中缓存"
+
+
+def test_player_query_populates_split_cache_for_free():
+    calls: list = []
+    client = _client(_bridge_payload(), calls)
+    client._note_ranked_split_payload(_bridge_payload())
+    info = asyncio.run(
+        client.fetch_current_season_info(
+            now=datetime(2026, 8, 25, 3, 0, tzinfo=timezone.utc)
+        )
+    )
+    assert calls == [], "已有玩家查询喂过缓存，不该再发探测请求"
+    assert info.season_number == 30
+
+
+def test_note_payload_ignores_unusable_data():
+    client = _client()
+    for bad in (None, {}, _bridge_payload(include_meta=False)):
+        client._note_ranked_split_payload(bad)
+    assert client._season_cache == {}
+
+
+def test_cache_is_dropped_once_the_split_window_has_passed():
+    client = _client(_bridge_payload())
+    now = datetime(2026, 8, 25, 3, 0, tzinfo=timezone.utc)
+    asyncio.run(client.fetch_current_season_info(now=now))
+    assert client._get_cached_season("season:current", now=now) is not None
+    after_end = datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc)
+    assert client._get_cached_season("season:current", now=after_end) is None
+
+
+def test_missing_ranked_meta_raises_instead_of_guessing():
+    client = _client(_bridge_payload(include_meta=False))
+    with pytest.raises(RuntimeError, match="分段"):
+        asyncio.run(
+            client.fetch_current_season_info(
+                now=datetime(2026, 8, 25, 3, 0, tzinfo=timezone.utc)
+            )
+        )
+
+
+def test_numbered_season_query_falls_back_to_current_split():
+    """历史赛季查询已不支持：ALS 只暴露当前分段。"""
+    calls: list = []
+    client = _client(_bridge_payload(), calls)
+    info = asyncio.run(client.fetch_season_info(25))
+    assert info.season_number == 30, "忽略赛季号，返回当前分段"
+    assert calls == ["moeneri"]
+
+
+# --------------------------------------------------------------------------
+# _resolve_season_status
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "now,expected",
+    [
+        (datetime(2026, 8, 1, tzinfo=timezone.utc), "未开始"),
+        (datetime(2026, 8, 25, tzinfo=timezone.utc), "进行中"),
+        (datetime(2026, 10, 1, tzinfo=timezone.utc), "已结束"),
+    ],
+)
+def test_resolve_season_status(now, expected):
+    assert (
+        apex_service._resolve_season_status(
+            "2026-08-04T17:00:00Z", "2026-09-15T17:00:00Z", now=now
+        )
+        == expected
     )
 
-    with pytest.raises(RuntimeError, match="URL"):
-        asyncio.run(
-            client._fetch_season_from_apexseasons(
-                None,
-                use_public_split_index=False,
-                now=datetime(2026, 7, 10, tzinfo=timezone.utc),
-            )
-        )
 
-    assert requested_urls == [apex_service.APEX_SEASONS_HOME_URL]
+# --------------------------------------------------------------------------
+# 回归：SeasonInfo 瘦身后的下游消费者
+# --------------------------------------------------------------------------
 
 
-def test_current_fetch_validates_homepage_before_request(monkeypatch):
-    unsafe_home = "http://169.254.169.254/latest/meta-data/"
-    monkeypatch.setattr(apex_service, "APEX_SEASONS_HOME_URL", unsafe_home)
-    requested_urls: list[str] = []
-    client = _client_with_pages(
-        {unsafe_home: "<html>not a season page</html>"},
-        requested_urls,
+def test_daily_map_season_key_does_not_touch_removed_season_name():
+    """回归：_daily_map_season_key 曾访问已删除的 season_name，导致全天地图刷新崩溃。"""
+    info = apex_service._build_season_info_from_split(
+        apex_service._parse_ranked_split_window(_bridge_payload())
     )
-
-    with pytest.raises(RuntimeError, match="URL"):
-        asyncio.run(
-            client._fetch_season_from_apexseasons(
-                None,
-                use_public_split_index=False,
-                now=datetime(2026, 7, 10, tzinfo=timezone.utc),
-            )
-        )
-
-    assert requested_urls == []
+    key = apex_service._daily_map_season_key(info)
+    assert key == "br_ranked_s30_s1"
+    assert apex_service._daily_map_season_key(None) == ""
 
 
-def test_season_text_request_rejects_cross_origin_redirect_before_target_request():
-    requested_urls: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requested_urls.append(str(request.url))
-        if request.url.host == "apexseasons.online":
-            return httpx.Response(
-                302,
-                headers={"Location": "https://example.com/redirect-target"},
-                request=request,
-            )
-        raise AssertionError("cross-origin redirect target must not be requested")
-
-    async def exercise():
-        client = apex_service.ApexApiClient("", 1000, 0, _SilentLogger())
-        await client._client.aclose()
-        client._client = httpx.AsyncClient(
-            transport=httpx.MockTransport(handler),
-            follow_redirects=True,
-        )
-        try:
-            with pytest.raises(RuntimeError, match="URL"):
-                await client._request_text_with_retry(
-                    "https://apexseasons.online/start",
-                    allowed_hosts=apex_service.APEX_SEASONS_ALLOWED_HOSTS,
+def test_daily_map_season_key_changes_across_splits():
+    """地图池按分段轮换：跨分段时 key 必须变化，触发重新学习。"""
+    keys = {
+        apex_service._daily_map_season_key(
+            apex_service._build_season_info_from_split(
+                apex_service._parse_ranked_split_window(
+                    _bridge_payload(ranked_season=rs)
                 )
-        finally:
-            await client.close()
-
-    asyncio.run(exercise())
-
-    assert requested_urls == ["https://apexseasons.online/start"]
-
-
-def test_season_text_request_rejects_nondefault_port_redirect_before_target_request():
-    requested_urls: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requested_urls.append(str(request.url))
-        if str(request.url) == "https://apexseasons.online/start":
-            return httpx.Response(
-                302,
-                headers={"Location": "https://apexseasons.online:8443/detail"},
-                request=request,
             )
-        raise AssertionError("non-default port redirect target must not be requested")
-
-    async def exercise():
-        client = apex_service.ApexApiClient("", 1000, 0, _SilentLogger())
-        await client._client.aclose()
-        client._client = httpx.AsyncClient(
-            transport=httpx.MockTransport(handler),
-            follow_redirects=True,
         )
-        try:
-            with pytest.raises(RuntimeError, match="URL"):
-                await client._request_text_with_retry(
-                    "https://apexseasons.online/start",
-                    allowed_hosts=apex_service.APEX_SEASONS_ALLOWED_HOSTS,
-                )
-        finally:
-            await client.close()
-
-    asyncio.run(exercise())
-
-    assert requested_urls == ["https://apexseasons.online/start"]
+        for rs in ("br_ranked_s30_s1", "br_ranked_s30_s2")
+    }
+    assert len(keys) == 2
 
 
-def test_season_text_request_allows_same_origin_https_redirect():
-    requested_urls: list[str] = []
+def test_every_seasoninfo_attribute_touched_by_code_actually_exists():
+    """静态兜底：扫描源码里所有 season_info.<attr>，确保都还在 dataclass 上。
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        requested_urls.append(str(request.url))
-        if str(request.url) == "https://apexseasons.online/start":
-            return httpx.Response(
-                302,
-                headers={"Location": "https://www.apexseasons.online/detail"},
-                request=request,
-            )
-        if str(request.url) == "https://www.apexseasons.online/detail":
-            return httpx.Response(200, text="season detail", request=request)
-        raise AssertionError(f"unexpected URL: {request.url}")
+    SeasonInfo 本次大幅瘦身，ruff 抓不到属性级别的失效引用（F821 只管名字），
+    这条测试就是那道网。
+    """
+    import dataclasses
+    import re
+    from pathlib import Path
 
-    async def exercise():
-        client = apex_service.ApexApiClient("", 1000, 0, _SilentLogger())
-        await client._client.aclose()
-        client._client = httpx.AsyncClient(
-            transport=httpx.MockTransport(handler),
-            follow_redirects=True,
+    valid = {f.name for f in dataclasses.fields(apex_service.SeasonInfo)}
+    root = Path(__file__).resolve().parents[1]
+    pattern = re.compile(r"season_info\.([a-z_]+)")
+    offenders = {}
+    for name in ("apex_service.py", "main.py"):
+        text = (root / name).read_text(encoding="utf-8")
+        for attr in set(pattern.findall(text)):
+            if attr not in valid:
+                offenders.setdefault(name, set()).add(attr)
+    assert offenders == {}, f"引用了已不存在的 SeasonInfo 字段: {offenders}"
+
+
+def test_probe_is_throttled_while_anchored_end_precedes_real_rollover():
+    """冬令时翻页空档：锚定 end 已过但 ALS 仍返回旧窗口时，不能每次都打接口。
+
+    没有冷却的话，_get_cached_season 会因为 now 落在窗口外而反复清缓存，
+    而关键词监听器（任何含「赛季」的群消息都会触发）会把它放大成刷接口。
+    """
+    calls: list = []
+    # 真实 end = 2026-11-03 18:00Z（北京 11-04 02:00），锚定后变成北京 01:00
+    winter_end = int(datetime(2026, 11, 3, 18, 0, tzinfo=timezone.utc).timestamp())
+    payload = _bridge_payload(ranked_season="br_ranked_s30_s2", end=winter_end)
+    client = _client(payload, calls)
+    client._season_probe_cooldown_seconds = 300
+
+    gap = datetime(2026, 11, 3, 17, 30, tzinfo=timezone.utc)  # 北京 01:30
+    for _ in range(5):
+        info = asyncio.run(client.fetch_current_season_info(now=gap))
+
+    assert len(calls) == 1, f"冷却期内应只打一次接口，实际 {len(calls)} 次"
+    assert info.season_number == 30
+
+
+def test_player_query_refreshes_the_probe_cooldown_source():
+    """任何玩家查询都应喂饱冷却源，让 /新赛季 完全不必自己发请求。"""
+    calls: list = []
+    client = _client(_bridge_payload(), calls)
+    client._season_probe_cooldown_seconds = 300
+    client._note_ranked_split_payload(_bridge_payload())
+    assert client._last_season_probe is not None
+
+    client._season_cache.clear()  # 缓存没了，但冷却源还在
+    info = asyncio.run(
+        client.fetch_current_season_info(
+            now=datetime(2026, 8, 25, 3, 0, tzinfo=timezone.utc)
         )
-        try:
-            return await client._request_text_with_retry(
-                "https://apexseasons.online/start",
-                allowed_hosts=apex_service.APEX_SEASONS_ALLOWED_HOSTS,
-            )
-        finally:
-            await client.close()
-
-    assert asyncio.run(exercise()) == "season detail"
-    assert requested_urls == [
-        "https://apexseasons.online/start",
-        "https://www.apexseasons.online/detail",
-    ]
-
-
-def test_current_fetch_caps_invalid_candidate_requests():
-    references = [
-        {
-            "position": index + 1,
-            "name": f"Season {54 - index} Invalid",
-            "url": f"https://apexseasons.online/seasons/season-{54 - index}/",
-        }
-        for index in range(25)
-    ]
-    home_html = (
-        '<script type="application/ld+json">'
-        + json.dumps({"@type": "ItemList", "itemListElement": references})
-        + "</script>"
     )
-    pages = {apex_service.APEX_SEASONS_HOME_URL: home_html}
-    pages.update({reference["url"]: "<html>invalid range</html>" for reference in references})
-    requested_urls: list[str] = []
-    client = _client_with_pages(pages, requested_urls)
+    assert calls == [], "应由冷却源重建，不该发请求"
+    assert info.season_number == 30
 
-    with pytest.raises(RuntimeError, match="完整起止时间"):
+
+def test_note_payload_never_breaks_the_player_query():
+    """簿记失败不能影响本次段位查询本身。"""
+    client = _client()
+    for bad in (None, {}, {"global": "not-a-dict"}, {"global": {"rank": []}},
+                _bridge_payload(start=10**15, end=10**15 + 1)):
+        client._note_ranked_split_payload(bad)  # 不得抛异常
+    assert client._season_cache == {}
+
+
+def test_out_of_range_timestamps_are_rejected_not_crashed():
+    """毫秒纪元之类的越界时间戳应按「拿不到分段」处理，而不是抛 OSError。"""
+    assert apex_service._parse_ranked_split_window(
+        _bridge_payload(start=10**15, end=10**15 + 1)
+    ) is None
+
+
+def test_probe_account_failure_names_the_config_key():
+    """探测账号失效时，报错必须指向 season_probe_player，否则管理员无从下手。"""
+    client = _client(apex_service.PlayerNotFoundError("nope"))
+    with pytest.raises(apex_service.ApexApiError, match="season_probe_player"):
         asyncio.run(
-            client._fetch_season_from_apexseasons(
-                None,
-                use_public_split_index=False,
-                now=datetime(2026, 7, 10, tzinfo=timezone.utc),
+            client.fetch_current_season_info(
+                now=datetime(2026, 8, 25, 3, 0, tzinfo=timezone.utc)
             )
         )
-
-    assert len(requested_urls) <= 1 + 4
-    assert requested_urls[0] == apex_service.APEX_SEASONS_HOME_URL
-
-
-def test_current_fetch_skips_future_404_and_selects_current_range():
-    upcoming_url = "https://apexseasons.online/seasons/season-30/"
-    current_url = "https://apexseasons.online/seasons/season-29/"
-    home_html = f'''<script type="application/ld+json">{json.dumps({
-      "@type": "ItemList",
-      "itemListElement": [
-        {"position": 1, "name": "Season 30 Future Shock", "url": upcoming_url},
-        {"position": 2, "name": "Season 29 Overclocked", "url": current_url},
-      ],
-    })}</script>'''
-    current_html = '''<script type="application/ld+json">{
-      "@type": "Event",
-      "startDate": "2026-05-05T18:00:00Z",
-      "endDate": "2026-08-04T18:00:00Z"
-    }</script>'''
-    requested_urls: list[str] = []
-    client = _client_with_pages(
-        {
-            apex_service.APEX_SEASONS_HOME_URL: home_html,
-            upcoming_url: _http_status_error(upcoming_url, 404),
-            current_url: current_html,
-        },
-        requested_urls,
-    )
-
-    season = asyncio.run(
-        client._fetch_season_from_apexseasons(
-            None,
-            use_public_split_index=False,
-            now=datetime(2026, 7, 10, tzinfo=timezone.utc),
-        )
-    )
-
-    assert season.season_number == 29
-    assert requested_urls == [
-        apex_service.APEX_SEASONS_HOME_URL,
-        upcoming_url,
-        current_url,
-    ]
-
-
-def test_current_fetch_propagates_general_candidate_request_error():
-    upcoming_url = "https://apexseasons.online/seasons/season-30/"
-    current_url = "https://apexseasons.online/seasons/season-29/"
-    home_html = f'''<script type="application/ld+json">{json.dumps({
-      "@type": "ItemList",
-      "itemListElement": [
-        {"position": 1, "name": "Season 30 Future Shock", "url": upcoming_url},
-        {"position": 2, "name": "Season 29 Overclocked", "url": current_url},
-      ],
-    })}</script>'''
-    request = httpx.Request("GET", upcoming_url)
-    requested_urls: list[str] = []
-    client = _client_with_pages(
-        {
-            apex_service.APEX_SEASONS_HOME_URL: home_html,
-            upcoming_url: httpx.ConnectError("network unavailable", request=request),
-        },
-        requested_urls,
-    )
-
-    with pytest.raises(httpx.ConnectError, match="network unavailable"):
-        asyncio.run(
-            client._fetch_season_from_apexseasons(
-                None,
-                use_public_split_index=False,
-                now=datetime(2026, 7, 10, tzinfo=timezone.utc),
-            )
-        )
-
-    assert requested_urls == [apex_service.APEX_SEASONS_HOME_URL, upcoming_url]
-
-
-def test_split_boundary_is_first_beijing_wednesday_not_before_midpoint():
-    start = datetime(2026, 5, 5, 18, tzinfo=timezone.utc)
-    end = datetime(2026, 8, 4, 18, tzinfo=timezone.utc)
-
-    boundary = apex_service._infer_split_boundary(start, end)
-
-    assert boundary == datetime(2026, 6, 23, 17, tzinfo=timezone.utc)
-
-
-def test_split_boundary_keeps_midpoint_when_it_is_wednesday_0100_beijing():
-    start = datetime(2026, 6, 2, 17, tzinfo=timezone.utc)
-    end = datetime(2026, 6, 16, 17, tzinfo=timezone.utc)
-
-    boundary = apex_service._infer_split_boundary(start, end)
-
-    assert boundary == datetime(2026, 6, 9, 17, tzinfo=timezone.utc)
-
-
-def test_split_boundary_does_not_choose_a_closer_wednesday_before_midpoint():
-    start = datetime(2026, 6, 3, 17, tzinfo=timezone.utc)
-    end = datetime(2026, 6, 17, 17, tzinfo=timezone.utc)
-
-    boundary = apex_service._infer_split_boundary(start, end)
-
-    assert boundary == datetime(2026, 6, 16, 17, tzinfo=timezone.utc)
-
-
-def test_invalid_complete_range_is_rejected_without_fixed_91_day_fallback():
-    detail_url = "https://apexseasons.online/seasons/season-29-overclocked/"
-    home_html = f'''<script type="application/ld+json">{{
-      "@context": "https://schema.org",
-      "@type": "ItemList",
-      "itemListElement": [{{
-        "@type": "ListItem",
-        "position": 1,
-        "name": "Season 29 Overclocked",
-        "url": "{detail_url}"
-      }}]
-    }}</script>'''
-    client = _client_with_pages(
-        {
-            apex_service.APEX_SEASONS_HOME_URL: home_html,
-            detail_url: "<html>no complete event range</html>",
-        }
-    )
-
-    try:
-        asyncio.run(client.fetch_current_season_info())
-    except RuntimeError as exc:
-        assert "完整起止时间" in str(exc)
-    else:
-        raise AssertionError("missing complete range must fail")
-
-
-def test_reversed_complete_range_is_rejected():
-    detail_url = "https://apexseasons.online/seasons/season-29-overclocked/"
-    home_html = f'''<script type="application/ld+json">{{
-      "@type": "ItemList",
-      "itemListElement": [{{
-        "position": 1,
-        "name": "Season 29 Overclocked",
-        "url": "{detail_url}"
-      }}]
-    }}</script>'''
-    detail_html = '''<script type="application/ld+json">{
-      "@type": "Event",
-      "startDate": "2026-08-04T18:00:00Z",
-      "endDate": "2026-05-05T18:00:00Z"
-    }</script>'''
-    client = _client_with_pages(
-        {
-            apex_service.APEX_SEASONS_HOME_URL: home_html,
-            detail_url: detail_html,
-        }
-    )
-
-    try:
-        asyncio.run(client.fetch_current_season_info())
-    except RuntimeError as exc:
-        assert "完整起止时间" in str(exc)
-    else:
-        raise AssertionError("reversed complete range must fail")
-
-
-def test_complete_range_rejects_date_only_values():
-    season = _season_with_range("2026-05-05", "2026-08-04")
-
-    try:
-        apex_service._require_complete_season_range(season)
-    except RuntimeError as exc:
-        assert "完整起止时间" in str(exc)
-    else:
-        raise AssertionError("date-only complete range must fail")
-
-
-def test_complete_range_rejects_offset_free_datetimes():
-    season = _season_with_range(
-        "2026-05-05T18:00:00",
-        "2026-08-04T18:00:00",
-    )
-
-    try:
-        apex_service._require_complete_season_range(season)
-    except RuntimeError as exc:
-        assert "完整起止时间" in str(exc)
-    else:
-        raise AssertionError("offset-free complete range must fail")
-
-
-def test_complete_range_accepts_explicit_utc_offsets():
-    season = _season_with_range(
-        "2026-05-06T02:00:00+08:00",
-        "2026-08-05T02:00:00+08:00",
-    )
-
-    start, end = apex_service._require_complete_season_range(season)
-
-    assert start == datetime(2026, 5, 5, 18, tzinfo=timezone.utc)
-    assert end == datetime(2026, 8, 4, 18, tzinfo=timezone.utc)
-
-
-def test_update_current_split_state_accepts_injected_now():
-    season = _season_with_range(
-        "2026-05-05T18:00:00Z",
-        "2026-08-04T18:00:00Z",
-    )
-    apex_service._apply_ranked_split_details(season, {})
-
-    apex_service._update_current_split_state(
-        season,
-        now=datetime(2026, 6, 10, tzinfo=timezone.utc),
-    )
-
-    assert season.current_split_label == "上半赛季"
-    assert season.current_split_index == 1
-    assert season.next_transition_label == "下半赛季开始"
-
-    apex_service._update_current_split_state(
-        season,
-        now=datetime(2026, 6, 23, 17, tzinfo=timezone.utc),
-    )
-
-    assert season.current_split_label == "下半赛季"
-    assert season.current_split_index == 2
-    assert season.next_transition_label == "赛季结束"
-
-
-def test_resolve_season_status_accepts_injected_now():
-    start_iso = "2026-05-05T18:00:00Z"
-    end_iso = "2026-08-04T18:00:00Z"
-
-    assert apex_service._resolve_season_status(
-        start_iso,
-        end_iso,
-        now=datetime(2026, 5, 5, 17, tzinfo=timezone.utc),
-    ) == "未开始"
-    assert apex_service._resolve_season_status(
-        start_iso,
-        end_iso,
-        now=datetime(2026, 7, 10, tzinfo=timezone.utc),
-    ) == "进行中"
-    assert apex_service._resolve_season_status(
-        start_iso,
-        end_iso,
-        now=datetime(2026, 8, 4, 18, tzinfo=timezone.utc),
-    ) == "已结束"
-
-
-def test_cached_season_refreshes_derived_state_on_each_hit():
-    season = _season_with_range(
-        "2026-05-05T18:00:00Z",
-        "2026-08-04T18:00:00Z",
-    )
-    apex_service._apply_ranked_split_details(season, {})
-    client = _client_with_pages({})
-    client._season_cache["season:current"] = (
-        apex_service.time.monotonic(),
-        season,
-    )
-
-    before = client._get_cached_season(
-        "season:current",
-        now=datetime(2026, 6, 10, tzinfo=timezone.utc),
-    )
-
-    assert before is season
-    assert before.status_text == "进行中"
-    assert before.current_split_label == "上半赛季"
-    assert before.current_split_index == 1
-    assert before.next_transition_label == "下半赛季开始"
-
-    after = client._get_cached_season(
-        "season:current",
-        now=datetime(2026, 6, 23, 17, tzinfo=timezone.utc),
-    )
-
-    assert after is season
-    assert after.status_text == "进行中"
-    assert after.current_split_label == "下半赛季"
-    assert after.current_split_index == 2
-    assert after.next_transition_label == "赛季结束"
-
-
-def test_current_season_cache_expires_at_fixed_beijing_end_boundary():
-    season = _season_with_range(
-        "2026-05-05T17:00:00Z",
-        "2026-08-04T17:00:00Z",
-    )
-    client = _client_with_pages({})
-    client._season_cache["season:current"] = (
-        apex_service.time.monotonic(),
-        season,
-    )
-
-    cached = client._get_cached_season(
-        "season:current",
-        now=datetime(2026, 8, 4, 17, tzinfo=timezone.utc),
-    )
-
-    assert cached is None
-    assert "season:current" not in client._season_cache
-
-
-def test_numbered_season_cache_remains_available_after_end_boundary():
-    season = _season_with_range(
-        "2026-05-05T17:00:00Z",
-        "2026-08-04T17:00:00Z",
-    )
-    client = _client_with_pages({})
-    client._season_cache["season:29"] = (
-        apex_service.time.monotonic(),
-        season,
-    )
-
-    cached = client._get_cached_season(
-        "season:29",
-        now=datetime(2026, 8, 4, 17, tzinfo=timezone.utc),
-    )
-
-    assert cached is season
-    assert cached.status_text == "已结束"
